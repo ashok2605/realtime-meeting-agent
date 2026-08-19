@@ -1,14 +1,9 @@
 """Gemini Live session: connect/reconnect loop and the receive loop.
 
-Responsiveness invariant: the receive loop only does O(1) synchronous work per
-message (buffer appends, event emits, local state mutations) plus fast
-websocket writes for tool responses. It never awaits the pacer, the gate, or
-the page.
-
-Longevity: context-window compression removes the 15-minute audio session cap;
-session resumption handles survive the ~10-minute connection recycles and
-GoAway notices. On reconnect mid-meeting we re-seed conversational context
-with a compact discovery-state note.
+Invariant: the receive loop does only O(1) synchronous work per message —
+it also carries `interrupted` and tool calls, so it never awaits the pacer,
+gate, or page. Longevity = context compression (15-min cap) + resumption
+handles (~10-min connection recycles) + a state note on reconnect.
 """
 
 from __future__ import annotations
@@ -185,11 +180,8 @@ class GeminiSession:
 
         if msg.usage_metadata is not None:
             um = msg.usage_metadata
-            # Raw per-turn accounting only. NOTE: total_token_count is NOT a
-            # context-size proxy — it swings with turn size and interrupted
-            # turns report partial usage (proven live) — so no online logic may
-            # ever be attached to drops in this number. Analyze offline if
-            # curious; events.jsonl has every reading.
+            # total_token_count is per-turn accounting, NOT a context-size
+            # proxy — never attach online logic to drops in it (DESIGN.md §6).
             self._bus.emit("gemini.usage", total_tokens=um.total_token_count)
 
     async def _finish_deferred(self, fc: types.FunctionCall,
@@ -211,9 +203,7 @@ class GeminiSession:
         except ConnectionClosed:
             self._bus.emit("gemini.send_dropped", kind="tool_response")
 
-    # ---- sends -------------------------------------------------------------
-    # All sends tolerate a mid-reconnect session: frames dropped during the gap
-    # are gone (correct for realtime audio); run() restores the session.
+    # ---- sends (all tolerate a mid-reconnect gap; run() restores the session)
 
     async def send_audio(self, pcm_16k: bytes) -> None:
         session = self._session
@@ -239,9 +229,8 @@ class GeminiSession:
             pass
 
     async def send_text(self, text: str) -> bool:
-        """Returns True only if the note actually reached the model — callers
-        log their events on success, so the event log never claims a nudge
-        that a mid-reconnect gap silently swallowed."""
+        """True only if the note reached the model — callers log on success,
+        so the event log can't claim nudges a reconnect gap swallowed."""
         session = self._session
         if session is None:
             self._bus.emit("gemini.send_dropped", kind="text", reason="no_session")

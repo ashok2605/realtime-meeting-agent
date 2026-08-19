@@ -1,9 +1,8 @@
-"""Discovery session state: the preset questions and their tool-call-driven answers.
+"""Preset discovery questions + their tool-call-driven answer state.
 
-Theme: Salesforce implementation discovery for an automotive company.
-All mutations happen through tool calls from Gemini Live (record_answer etc.)
-or dashboard controls; every change emits an event and keeps a revision
-history so re-answers are visible, idempotent updates.
+Theme: Salesforce implementation for an automotive company. Mutations come
+from Gemini tool calls or dashboard controls; every change emits an event
+and keeps revision history (re-answers are idempotent updates).
 """
 
 from __future__ import annotations

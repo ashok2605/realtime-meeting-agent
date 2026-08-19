@@ -1,9 +1,8 @@
 """Tool declarations and dispatch for the Live session.
 
-Contract (user-mandated): tool handlers only mutate local state or schedule
-background work — they must return to the receive loop immediately. Anything
-slow (Recall REST calls, grounded search) runs as an asyncio task; for
-web_search the tool response itself is deferred and sent when ready.
+Contract: handlers only mutate local state or schedule background work —
+they return to the receive loop immediately. Slow work (Recall REST,
+grounded search) runs as a task; web_search's response is sent deferred.
 """
 
 from __future__ import annotations

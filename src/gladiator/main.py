@@ -9,10 +9,8 @@ import sys
 import time
 from pathlib import Path
 
-# Must be module-level: with `from __future__ import annotations`, FastAPI
-# resolves the string annotation "WebSocket" against THIS module's globals.
-# A function-local import silently degrades `ws: WebSocket` into a required
-# query parameter and every websocket handshake dies with a 403.
+# Must be module-level: with future-annotations, FastAPI resolves "WebSocket"
+# in module globals — a local import degrades it to a required query param (403s).
 from fastapi import WebSocket
 
 from .config import Settings, get_settings

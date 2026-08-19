@@ -1,7 +1,5 @@
-"""Two-signal floor gate: EnergyVAD on the meeting audio is the primary
-'a human is speaking' signal (regression from the first live rehearsal, where
-Recall sent one speech_on and zero speech_off in a 4-minute single-participant
-Meet, silently disabling the events-only gate)."""
+"""Floor gate signal policy: live VAD is authoritative; Recall events
+gate only when the VAD is stale or absent (DESIGN.md §4)."""
 
 import asyncio
 import time
@@ -55,11 +53,7 @@ async def test_vad_release_after_hangover_plus_grace():
 
 
 async def test_vad_is_authoritative_over_phantom_speech_events():
-    """Live regression (runs/20260820-010704): a stray speech_on with no
-    speech_off — fired while the bot was still in the waiting room — blocked
-    the floor against a provably silent mic for the full 20s prune window,
-    stale-dropping the reply to the user's 'Hello'. With a VAD present,
-    Recall events are attribution-only and must never block."""
+    """A phantom speech_on (no speech_off) must not block a quiet room."""
     t = {"now": 100.0}
     vad = EnergyVAD(hangover_ms=50, clock=lambda: t["now"])
     speech, gate = make_gate(vad)
@@ -88,9 +82,7 @@ async def test_events_still_gate_when_vad_disabled():
 
 
 async def test_hard_stop_unions_both_signals(tmp_path):
-    """The safety watchdog takes the UNION: VAD catches speech Recall never
-    reports; fresh Recall events catch speakers the VAD can't hear (soft voice
-    below threshold). Ancient stuck events are pruned before consultation."""
+    """Watchdog = union of live VAD + pruned events (soft speakers covered)."""
     settings = Settings(recall_api_key="x", gemini_api_key="x", runs_dir=tmp_path,
                         gate_hard_stop_ms=50, gate_max_hold_ms=1_000)
     rt = Runtime(settings)
@@ -128,9 +120,7 @@ async def test_hard_stop_unions_both_signals(tmp_path):
 
 
 async def test_stale_vad_falls_back_to_events_gating():
-    """Review finding: a stalled feed froze the VAD and either opened the floor
-    over talking humans (frozen quiet) or muted the bot forever (frozen voice).
-    A stale VAD must surrender authority back to Recall events."""
+    """A stale (stalled-feed) VAD surrenders gate authority back to events."""
     t = {"now": 100.0}
     vad = EnergyVAD(hangover_ms=50, clock=lambda: t["now"])
     speech, gate = make_gate(vad, clock=lambda: t["now"])

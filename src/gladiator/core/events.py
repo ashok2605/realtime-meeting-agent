@@ -1,13 +1,7 @@
-"""EventBus: the single spine for observability.
-
-Every meaningful thing that happens (Recall events, Gemini messages, gate
-decisions, tool calls, latency marks) is emitted here exactly once, and fans
-out to: a JSONL log on disk, an in-memory ring (dashboard backlog), and live
-subscriber queues (dashboard websockets). `replay` re-drives the dashboard
-from the JSONL file, so events must be self-describing.
-
-emit() is synchronous and never blocks: callers include the Gemini receive
-loop, whose responsiveness is a hard invariant.
+"""EventBus: every event fans out to a JSONL log, an in-memory ring
+(dashboard backlog), and live subscriber queues. Events must be
+self-describing (`replay` re-drives the dashboard from the file).
+emit() is synchronous and never blocks — the Gemini receive loop calls it.
 """
 
 from __future__ import annotations

@@ -1,6 +1,5 @@
-"""User-mandated stale-response policy, end to end through the real Pacer:
-a response buffered while a human monologues must be dropped — including the
-rest of its generation still streaming in — and never played afterwards."""
+"""Stale-response policy through the real Pacer: a response buffered
+behind a human monologue is dropped, tail included, never played late."""
 
 import asyncio
 

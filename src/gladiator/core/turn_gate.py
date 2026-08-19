@@ -1,26 +1,13 @@
 """Turn-taking floor control: the agent must never talk over a human.
 
-Two independent signals feed the gate:
+Signals: a live EnergyVAD on the meeting audio (primary) and Recall's
+speech_on/off events (attribution; gating fallback when the VAD is stale or
+absent). Why this split — and its live-tested failure modes — is DESIGN.md §4.
 
-1. **EnergyVAD on the live meeting audio** (primary). Continuous and truthful;
-   empirically verified to exclude the bot's own voice. Added after the first
-   live rehearsal showed signal 2 is nearly absent in small meetings.
-2. **Recall's participant_events.speech_on/off** (secondary + attribution).
-   Speaker-named, but in a single-participant Google Meet the active-speaker
-   signal barely fires (observed: one speech_on, zero speech_off in 4 min).
-   Still valuable in multi-participant calls and for the dashboard's
-   "who is speaking" display.
-
-FloorGate is what the Pacer consults before releasing each audio chunk:
-
-  OPEN  - no human has spoken for >= grace_ms: chunk may play.
-  (wait) - a human is speaking / just stopped: chunk waits.
-  DROP  - the gate has been held for >= stale_drop_ms: the buffered response
-          is stale (the human moved on); drop the whole epoch instead of
-          playing an out-of-date answer when they stop.
-
-A stuck speech_on (participant left mid-word, event lost) is pruned after
-max_hold_ms so the agent can never be muted forever.
+The Pacer consults FloorGate per audio chunk: OPEN after grace_ms of silence;
+waits while a human speaks; DROP once held past stale_drop_ms (an out-of-date
+answer must not play when the human stops). Stuck speech_on entries are pruned
+after max_hold_ms.
 """
 
 from __future__ import annotations
@@ -123,10 +110,7 @@ class FloorGate:
         self._clock = clock
         self.last_hold_ms: float = 0.0
 
-    # A VAD that hasn't seen frames recently is untrustworthy (stalled feed,
-    # capture failure, or no audio yet): fall back to events-gating until it
-    # recovers. Frozen 'quiet' must not open the floor over talking humans;
-    # frozen 'voice' must not mute the bot forever.
+    # no frames for this long -> VAD untrustworthy, events gate instead
     VAD_STALE_AFTER_S = 1.5
 
     def _live_vad(self) -> VoiceSignal | None:
@@ -141,18 +125,13 @@ class FloorGate:
     def _silence_duration(self) -> float:
         vad = self._live_vad()
         if vad is not None:
-            # VAD-authoritative: the meeting audio is the truth about silence.
             quiet = vad.last_quiet_mono()
             return 0.0 if quiet is None else self._clock() - quiet
         return self._clock() - self._speech.last_speech_off_mono
 
     def is_open(self) -> bool:
-        """VAD-authoritative while the VAD is live: Recall speech events
-        observed live are both sparse AND asymmetric in small meetings (a
-        speech_on with no speech_off, fired while the bot was still in the
-        waiting room, once blocked the floor for the full 20s prune window
-        against a silent mic). While a live VAD holds authority, events are
-        attribution-only; when the VAD is stale/absent, events gate."""
+        """A live VAD is authoritative (events are attribution-only then);
+        when the VAD is stale or absent, events gate. Rationale: DESIGN.md §4."""
         vad = self._live_vad()
         if vad is not None:
             return not vad.in_voice and self._silence_duration() >= self._grace_s

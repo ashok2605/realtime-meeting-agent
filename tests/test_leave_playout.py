@@ -1,8 +1,5 @@
-"""Regression: leave_meeting must not eject the bot mid-goodbye.
-
-Found in the first live rehearsal — the fixed 3s grace was shorter than the
-farewell, so Recall pulled the bot while it was still talking. The leave task
-now waits for the goodbye audio to fully drain (bounded)."""
+"""leave_meeting waits (bounded) for the goodbye audio to drain before
+the Recall leave call — never ejects the bot mid-sentence."""
 
 import asyncio
 import time

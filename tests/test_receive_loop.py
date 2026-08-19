@@ -1,6 +1,5 @@
-"""User-mandated invariant: the Gemini receive loop stays responsive while the
-pacer is saturated. `interrupted` and tool calls must be processed instantly
-even with minutes of undelivered audio buffered."""
+"""Invariant: the receive loop processes `interrupted` and tool calls
+instantly even with minutes of undelivered audio buffered."""
 
 import asyncio
 import time

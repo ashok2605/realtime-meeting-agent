@@ -96,9 +96,7 @@ async def test_pacer_discards_stale_epoch_chunks():
 
 
 def test_anchor_consumed_once_and_clearable():
-    """Explicit causality (review finding): one utterance anchors at most one
-    turn, and a text nudge clears the anchor so nudge-caused turns never
-    inherit stale speech timing — no age heuristic censoring slow real turns."""
+    """One utterance anchors at most one turn; nudges clear the anchor."""
     t = {"now": 100.0}
     bus = EventBus()
     tracker = LatencyTracker(bus, clock=lambda: t["now"])

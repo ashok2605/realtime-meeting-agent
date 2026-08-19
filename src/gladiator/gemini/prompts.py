@@ -1,9 +1,8 @@
 """System instruction and nudges for the Gladiator persona.
 
-Structure follows Gemini Live best practices: persona -> conversational rules
--> tool rules (each with an explicit invocation condition) -> guardrails.
-Nudges are injected as realtime text by the runtime (Live waits for user
-input before speaking, so the greeting needs a trigger).
+Structure: persona -> conversational rules -> tool rules (each with an
+explicit invocation condition) -> guardrails. Nudges are realtime text sent
+by the runtime (Live waits for user input, so the greeting needs a trigger).
 """
 
 from __future__ import annotations
@@ -102,9 +101,7 @@ DROPPED_RESPONSE_NUDGE = (
 
 
 def context_refresher(progress_note: str) -> str:
-    """Routine periodic state maintenance (sent every reanchor_interval_s at a
-    quiet moment) — NOT a reaction to anything; the runtime sends it on a
-    timer so long sessions always hold the authoritative discovery state."""
+    """Routine timer-driven state note (not a reaction to anything)."""
     return (
         f"[system note] Routine reminder of the authoritative discovery state: {progress_note} "
         "You already greeted the participants — do NOT greet again or restart. Never re-ask, "

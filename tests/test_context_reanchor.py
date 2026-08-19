@@ -1,12 +1,6 @@
-"""Context maintenance: deterministic periodic re-anchoring.
-
-History (kept for the walkthrough): a usage-drop eviction *detector* was built
-and then deleted after live data showed usage_metadata.total_token_count is
-per-turn accounting noise (interrupted turns report partial usage; totals
-swing 4.2k -> 8.9k -> 4.9k in a minute). Final design: no detection at all —
-an oversized compression window makes eviction impossible in meeting-length
-sessions, and the runtime re-sends the authoritative discovery state on a
-timer, only at quiet moments, never during wrap-up or after the meeting."""
+"""Periodic re-anchoring: the authoritative discovery state is re-sent on
+a timer, only at quiet moments, never in wrap-up or after the meeting.
+(Why not eviction *detection*: DESIGN.md §6.)"""
 
 import asyncio
 import time
@@ -81,8 +75,7 @@ async def test_reanchor_waits_out_a_talking_room(tmp_path):
 
 
 async def test_reanchor_never_interrupts_open_generation(tmp_path):
-    """Review finding: a text nudge is a user turn — landing it while the model
-    is generating cancels the pending answer. Quiet floor is not enough."""
+    """A text nudge mid-generation cancels the pending answer — must wait."""
     rt = make_runtime(tmp_path)
     room_quiet(rt)
     rt.bridge.on_model_audio(b"\x00\x01" * 4800)  # generation in flight
@@ -109,8 +102,7 @@ async def test_reanchor_skips_wrapup_and_stops_after_meeting(tmp_path):
 
 
 async def test_reanchor_event_only_when_actually_delivered(tmp_path):
-    """Review finding: the event fired before send_text, which silently no-ops
-    mid-reconnect — the log claimed anchors that never reached the model."""
+    """The event is logged only if the note actually reached the model."""
     rt = make_runtime(tmp_path)
     room_quiet(rt)
     rt.session._session = None  # Gemini mid-reconnect

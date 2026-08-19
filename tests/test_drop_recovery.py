@@ -1,10 +1,5 @@
-"""Regression for the 'bot seems mute at meeting start' finding.
-
-People are usually talking right when they admit the bot, so (1) the greeting
-must wait for a quiet floor instead of being generated straight into a
-stale-drop, and (2) when a response IS force-dropped, the model must be told
-participants never heard it — otherwise its world model and the humans'
-diverge (it believes it asked a question nobody heard)."""
+"""Greeting waits for a quiet floor; force-dropped responses trigger a
+"participants didn't hear you" note once the floor frees."""
 
 import asyncio
 import time

@@ -1,11 +1,7 @@
-// Player worklet: queue of 24kHz Int16 chunks from the server, rendered
-// sample-accurately by the audio thread (this is what makes output jitter-free:
-// chunks are queued ahead and consumed at exactly the hardware rate).
-//
-// Epoch rules: chunks carry the server's turn epoch. A 'flush' drops the whole
-// queue instantly (barge-in cutoff) and advances the epoch; stale chunks are
-// ignored. 'started' is posted when the first sample of a new epoch actually
-// renders, so the main thread can timestamp true playback start.
+// Player worklet: queued 24kHz Int16 chunks rendered sample-accurately on the
+// audio thread (jitter-free). 'flush' drops the queue instantly (barge-in) and
+// advances the epoch; stale-epoch chunks are ignored. 'started' fires when a
+// new epoch's first sample actually renders (true playback timestamp).
 
 class PlayerProcessor extends AudioWorkletProcessor {
   constructor() {

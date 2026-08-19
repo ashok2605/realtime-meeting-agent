@@ -45,12 +45,8 @@ class Runtime:
         self.tracker = DiscoveryTracker(self.bus)
         self.speech = SpeechState(bot_name=settings.bot_name)
         self.bridge = AudioBridge(self.bus, self.latency, chunk_ms=settings.outbound_chunk_ms)
-        # EnergyVAD is the gate's primary signal (Recall speech events barely
-        # fire in small meetings — see DESIGN.md §4), but ONLY on the page
-        # capture path, where "the mic excludes the bot's own voice" was
-        # verified empirically. The recall_ws fallback feeds a mixed stream
-        # that may include our own output — VAD authority there could make the
-        # bot silence itself. vad_gate=false also reverts to events-only.
+        # VAD gate authority only on the page path — its feed is verified free
+        # of the bot's own voice; the recall_ws mix may not be (DESIGN.md §4).
         self._vad_authoritative = settings.vad_gate and settings.audio_source == "page"
         self.gate = FloorGate(self.speech, self.bus,
                               grace_ms=settings.gate_grace_ms,
@@ -101,9 +97,7 @@ class Runtime:
 
     # ------------------------------------------------------------ lifecycle
     def _supervise(self, coro_fn, name: str) -> asyncio.Task:
-        """Background tasks must not die silently: an uncaught exception is
-        logged and the task restarts (review finding: one transport error would
-        have permanently, invisibly killed a task like the re-anchor loop)."""
+        """Background tasks must not die silently: log the exception, restart."""
         async def _run() -> None:
             while True:
                 try:
@@ -266,9 +260,7 @@ class Runtime:
     async def _wait_for_quiet(self, max_wait_s: float, *,
                               require_no_open_turn: bool = True) -> bool:
         """The single definition of 'the bot may make noise now': floor open,
-        nothing playing, and (usually) no model generation in flight. Shared by
-        the greeting, drop-recovery, and re-anchor paths — three copies of this
-        loop diverged during review and one divergence was a live bug."""
+        nothing playing, no generation in flight. Keep it single — copies diverge."""
         t0 = time.monotonic()
         while time.monotonic() - t0 < max_wait_s:
             quiet = self.gate.is_open() and not self.pacer.agent_playing
@@ -280,9 +272,8 @@ class Runtime:
         return False
 
     async def _greet_when_quiet(self, max_wait_s: float = 20.0) -> None:
-        """People usually ARE talking right when they admit the bot; a greeting
-        requested then just gets stale-dropped and the bot seems mute (observed
-        live). Wait for a quiet floor so the greeting actually plays."""
+        """People usually ARE talking when they admit the bot; wait for a quiet
+        floor or the greeting just gets stale-dropped (bot seems mute)."""
         t0 = time.monotonic()
         await self._wait_for_quiet(max_wait_s)  # timeout -> greet anyway
         waited = round((time.monotonic() - t0) * 1000, 1)
@@ -294,9 +285,8 @@ class Runtime:
         asyncio.get_running_loop().create_task(self._notify_dropped_response())
 
     async def _notify_dropped_response(self, max_wait_s: float = 30.0) -> None:
-        """A stale/hard drop means the humans never heard what the model said —
-        but the model doesn't know that. Once the floor frees up, tell it, so it
-        can restate (unless it already moved on with a newer response)."""
+        """A dropped response was never heard, but the model thinks it spoke.
+        Once the floor frees, tell it — unless a newer response superseded it."""
         epoch_at_drop = self.bridge.buffer.epoch
         t0 = time.monotonic()
         while time.monotonic() - t0 < max_wait_s:
@@ -346,9 +336,7 @@ class Runtime:
         async def _leave() -> None:
             if not self.bot_id:
                 return
-            # Don't yank the bot mid-goodbye: wait for the farewell audio to
-            # start (it's generated in the same turn as the tool call), then
-            # for it to fully drain — bounded so a leave can never hang.
+            # wait (bounded) for the farewell to start, then fully drain
             t0 = time.monotonic()
             while time.monotonic() - t0 < 4.0:
                 if self.pacer.agent_playing or self.bridge.buffer.buffered_ms > 0:
@@ -369,16 +357,10 @@ class Runtime:
 
     # ----------------------------------------------------------- background
     def _hard_stop_due(self) -> float | None:
-        """Overlap in ms if a human has been talking over playing agent audio
-        for >= gate_hard_stop_ms with no interruption handled yet, else None.
-
-        Safety-critical, so it takes the UNION of both signals: a live VAD
-        catches speech Recall never reports, and Recall events catch speakers
-        the VAD can't hear (soft voice below threshold, stalled feed). Stuck
-        phantom events are pruned first, so an ancient speech_on can't
-        force-drop healthy speech; a fresh false event costs at most one
-        dropped response, which the drop-recovery note restates — cheaper than
-        talking over a real human."""
+        """Overlap in ms once a human has talked over playing agent audio for
+        >= gate_hard_stop_ms with no interruption handled yet, else None.
+        Safety-critical -> UNION of both signals (live VAD + pruned events):
+        a false drop is recoverable, talking over a human is not."""
         if not self.pacer.agent_playing:
             return None
         hard_stop_s = self.settings.gate_hard_stop_ms / 1000
@@ -397,9 +379,8 @@ class Runtime:
         return None
 
     async def _hard_stop_watchdog(self) -> None:
-        """Belt-and-suspenders for 'never talk over a human': if a human has been
-        speaking over agent audio for gate_hard_stop_ms and Gemini hasn't sent
-        `interrupted`, force-drop the response ourselves."""
+        """Force-drop when a human talks over agent audio and Gemini's own
+        `interrupted` never arrived."""
         while True:
             await asyncio.sleep(0.1)
             overlap_ms = self._hard_stop_due()
@@ -411,10 +392,7 @@ class Runtime:
                 self.bridge.force_drop("hard_stop")
 
     async def _silence_nudger(self, silence_s: float = 45.0) -> None:
-        """If the room goes quiet mid-discovery, gently re-engage (once per lull).
-        'Activity' considers BOTH signals — review found this still keyed off
-        Recall-only events, which meant nudging into a monologue the VAD could
-        hear but Recall never reported."""
+        """Re-engage once per genuine lull; 'activity' means both signals."""
         while True:
             await asyncio.sleep(5)
             if not self._admitted or self.tracker.phase in ("wrapup", "done"):
@@ -432,12 +410,9 @@ class Runtime:
                     self.bus.emit("runtime.silence_nudge")
 
     async def _periodic_reanchor(self) -> None:
-        """Deterministic context maintenance: at a regular cadence, re-tell the
-        model the authoritative discovery state (answered/skipped/open, already
-        greeted). Delivered only at a quiet moment with no generation in flight
-        (a text nudge is a user turn — landing it mid-generation cancels the
-        pending answer); never during wrap-up/goodbye, and stops for good once
-        the bot's meeting is over."""
+        """Periodically re-tell the model the authoritative discovery state.
+        Only at quiet moments (a text nudge is a user turn — mid-generation it
+        cancels the pending answer); never in wrap-up; ends with the meeting."""
         interval = self.settings.reanchor_interval_s
         if interval <= 0:
             return
@@ -464,9 +439,7 @@ class Runtime:
         asyncio.get_running_loop().create_task(self.session.send_audio_stream_end())
 
     def _on_roster_change(self, kind: str, name: str) -> None:
-        """Give the model explicit multi-party awareness: who joined or left.
-        Suppressed before the greeting (the bot itself joining, the host already
-        present) so the opening isn't derailed."""
+        """Tell the model who joined/left; suppressed pre-greeting and for the bot itself."""
         if name.strip().lower() == self.settings.bot_name.strip().lower():
             return
         if not self._admitted or not self.session.greeted:
@@ -480,9 +453,7 @@ class Runtime:
 
     # ------------------------------------------------------------- fallback
     async def _grounded_search(self, query: str) -> dict[str, Any]:
-        """web_search tool backend for search_mode="function" (documented fallback:
-        a grounded generateContent call is a retrieval service; all conversational
-        reasoning stays in the Live session)."""
+        """web_search backend for search_mode="function" (justification: DESIGN.md §7)."""
         if self._genai_client is None:
             self._genai_client = genai.Client(api_key=self.settings.gemini_api_key)
         try:

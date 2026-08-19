@@ -84,19 +84,14 @@ class LatencyTracker:
         self._last_speech_end = mono if mono is not None else self._clock()
 
     def clear_anchor(self) -> None:
-        """Called whenever a text nudge is sent: the next turn is nudge-caused,
-        not speech-caused. Explicit causality — the runtime KNOWS which turns
-        it triggered — replaced an age heuristic that both censored genuinely
-        slow speech-caused turns (web-search answers >15s vanished from p95)
-        and still misattributed nudge turns fired shortly after speech."""
+        """A text nudge is causing the next turn — it must not inherit speech timing."""
         self._last_speech_end = None
 
     def mark_first_audio(self, epoch: int) -> None:
         turn = self._turns.setdefault(epoch, Turn(epoch=epoch))
         if turn.first_audio_mono is None:
             turn.first_audio_mono = self._clock()
-            # Consume-on-use: one utterance anchors at most one turn, so a
-            # second model turn without new speech can't inherit the anchor.
+            # consume-once: one utterance anchors at most one turn
             turn.speech_end_mono = self._last_speech_end
             self._last_speech_end = None
 

@@ -17,9 +17,7 @@ class Settings(BaseSettings):
     recall_api_key: str = ""
     recall_region: str = "us-west-2"
     gemini_api_key: str = ""
-    # Public https base URL of the tunnel (no trailing slash). Tunnel-agnostic:
-    # anything that forwards https/wss to this server works (ngrok, cloudflared, ...).
-    public_base_url: str = ""
+    public_base_url: str = ""  # tunnel https base, no trailing slash
 
     # --- server ---
     host: str = "127.0.0.1"
@@ -28,57 +26,37 @@ class Settings(BaseSettings):
     # --- identity / model ---
     bot_name: str = "Gladiator"
     voice_name: str = "Kore"
-    # Pinned: 2.5 native-audio line has an open truncation bug that worsens with
-    # tool calls + context compression (googleapis/python-genai#2117).
+    # pinned: 2.5 native-audio has an open truncation bug (python-genai#2117)
     gemini_model: str = "gemini-3.1-flash-live-preview"
 
     # --- audio path ---
-    # "page": capture meeting audio inside the Output Media page (~20ms frames).
-    # "recall_ws": fallback via Recall's audio_mixed_raw websocket (200ms chunks).
-    audio_source: str = "page"
-    outbound_chunk_ms: int = 40      # pacer cadence toward the page
+    audio_source: str = "page"        # "page" (~20ms frames) | "recall_ws" (200ms fallback)
+    outbound_chunk_ms: int = 40       # pacer cadence toward the page
     page_buffer_target_ms: int = 160  # page-side jitter buffer the pacer keeps primed
 
     # --- Gemini VAD (automatic activity detection) ---
-    vad_silence_duration_ms: int = 700   # docs recommend 500-800; high = never split humans
-    vad_prefix_padding_ms: int = 300     # 0 clips speech onset
-    # Hybrid VAD: on Recall speech_off, send audio_stream_end to skip the server's
-    # silence wait. Ships OFF; implemented as a measurable latency knob, not tuned.
-    hybrid_vad: bool = False
+    vad_silence_duration_ms: int = 700  # docs recommend 500-800; high = never split humans
+    vad_prefix_padding_ms: int = 300    # 0 clips speech onset
+    hybrid_vad: bool = False  # audio_stream_end on Recall speech_off; latency knob, ships OFF
 
-    # --- floor gate (agent must never interrupt a human) ---
-    # Gate on the EnergyVAD of the live meeting audio (primary signal; Recall's
-    # speech events barely fire in small meetings). Disable only if a room's
-    # speakers leak agent audio back into the meeting mic.
-    vad_gate: bool = True
+    # --- floor gate (agent must never interrupt a human; DESIGN.md §4) ---
+    vad_gate: bool = True           # gate on meeting-audio VAD (page path only)
     gate_grace_ms: int = 300        # silence required before agent may start speaking
     gate_stale_drop_ms: int = 2500  # gate held longer than this -> drop buffered answer
     gate_max_hold_ms: int = 20000   # stuck speech_on safety valve
     gate_hard_stop_ms: int = 400    # sustained human speech over agent audio -> force flush
 
-    # --- context management ---
-    # Sliding-window compression keeps sessions alive past Gemini's 15-min audio
-    # cap. Audio accrues ~25 tokens/sec per direction, so small windows (the
-    # docs' 25k/8k cost example) evict live conversation within minutes — seen
-    # in testing as mid-call amnesia (re-greeting, re-asking skipped questions).
-    # 100k/64k on a 131k-context model leaves compression as a >60-min safety
-    # net instead of an active participant.
+    # --- context management (sizing rationale: DESIGN.md §6) ---
     compression_trigger_tokens: int = 100_000
     compression_target_tokens: int = 64_000
-    # Deterministic state re-anchoring: every N seconds (at a quiet moment) the
-    # model gets a compact authoritative discovery-state note. Usage-based
-    # eviction *detection* proved unreliable (per-turn accounting noise), so we
-    # don't detect — we routinely re-anchor. 0 disables.
-    reanchor_interval_s: int = 480
+    reanchor_interval_s: int = 480  # periodic discovery-state note; 0 disables
 
     # --- tools ---
-    # "native": google_search inside the Live session (verified working on this key).
-    # "function": own web_search declaration backed by a grounded generateContent call.
-    search_mode: str = "native"
+    search_mode: str = "native"  # "native" google_search | "function" fallback (DESIGN.md §7)
 
     # --- bookkeeping ---
     runs_dir: Path = Path("runs")
-    # Auth token for everything the tunnel exposes (page, websockets, dashboard).
+    # auth token for everything the tunnel exposes (page, websockets, dashboard)
     session_token: str = Field(default_factory=lambda: secrets.token_urlsafe(16))
 
     @property

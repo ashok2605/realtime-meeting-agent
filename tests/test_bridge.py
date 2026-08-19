@@ -83,9 +83,7 @@ async def test_muted_bridge_forwards_nothing():
 
 
 async def test_force_drop_discard_is_sticky_across_refires():
-    """Review finding: the hard-stop watchdog can re-fire within its 280ms
-    agent_playing window; the second force_drop used to CLEAR the discard flag,
-    letting the killed generation's still-streaming tail play as a new turn."""
+    """A watchdog re-fire must not clear discard and replay the killed tail."""
     bridge = AudioBridge(EventBus(), LatencyTracker(EventBus()), chunk_ms=40)
     bridge.on_model_audio(b"\x00\x01" * 24000)   # generation streaming
     bridge.force_drop("hard_stop")

@@ -1,19 +1,12 @@
 """Audio bridge: meeting audio -> Gemini, Gemini audio -> meeting.
 
-Invariant (tested): the Gemini receive loop must NEVER block on audio
-delivery, because the same loop carries `interrupted` and tool calls. So:
+Invariant: the Gemini receive loop never blocks on audio delivery (it also
+carries `interrupted` and tool calls) — it appends synchronously to
+TurnAudioBuffer; the Pacer task drains at realtime rate.
 
-  receive loop --(sync append)--> TurnAudioBuffer --(Pacer task)--> page
-
-The buffer is unbounded server-side and flushable in O(1) via an epoch bump.
-Only the page keeps a small (~160 ms) jitter buffer, so a barge-in cutoff is
-near-instant: on `interrupted` we bump the epoch (server flush) and tell the
-page to drop its queued samples.
-
-Epoch semantics: the epoch is a turn/generation counter. It advances when a
-new model turn starts and whenever we forcibly flush (interruption, stale
-drop, hard stop). Chunks are stamped with their epoch; anything from an old
-epoch is discarded by both the Pacer and the page.
+Epochs count generations: bumped on each new turn and on every flush
+(interruption / stale drop / hard stop). Pacer and page discard chunks
+stamped with an old epoch.
 """
 
 from __future__ import annotations
@@ -90,16 +83,9 @@ class TurnAudioBuffer:
 
 
 class EnergyVAD:
-    """RMS voice detector on the inbound meeting audio.
-
-    This is the PRIMARY floor-gate signal: the first live rehearsal showed
-    Recall's speech_on/off events are nearly absent in a single-participant
-    Meet (one speech_on, zero speech_off in 4 minutes), while the meeting
-    audio itself is always truthful — and verified to exclude the bot's own
-    voice (RMS was zero during every agent turn). Also anchors latency
-    measurement at the true last-voiced frame. Hangover keeps normal pauses
-    from counting as speech-end.
-    """
+    """RMS voice detector on the inbound meeting audio — the floor gate's
+    primary signal (see DESIGN.md §4). Hangover keeps normal pauses from
+    counting as speech-end."""
 
     def __init__(self, threshold: int = 500, hangover_ms: int = 300,
                  on_speech_end: Callable[[float], None] | None = None,
@@ -115,10 +101,7 @@ class EnergyVAD:
         self.last_rms = 0
 
     def is_stale(self, max_age_s: float) -> bool:
-        """True when the VAD can't be trusted: it has never seen a frame, or the
-        audio feed stalled (page ws drop, capture failure). A frozen VAD must not
-        hold authority — frozen 'quiet' opens the floor over talking humans,
-        frozen 'voice' mutes the bot forever (review findings)."""
+        """No frames recently (or ever) — a frozen VAD must not hold gate authority."""
         return (self.last_feed_mono is None
                 or self._clock() - self.last_feed_mono > max_age_s)
 
@@ -130,7 +113,7 @@ class EnergyVAD:
 
     @staticmethod
     def _rms(pcm: bytes) -> int:
-        # audioop is deprecated (removed in 3.13); ~320 samples/frame is cheap in pure python.
+        # pure python: audioop is removed in 3.13
         if not pcm:
             return 0
         samples = array.array("h")
@@ -164,8 +147,7 @@ class AudioBridge:
         self.vad = EnergyVAD(on_speech_end=latency.mark_speech_end)
         self.muted = False
         self._turn_open = False
-        # After a stale drop / hard stop the server may keep streaming the rest
-        # of that generation; discard it until the turn boundary.
+        # set on force_drop: eat the rest of that generation until turn boundary
         self._discarding = False
         self._discarded_ms = 0.0
         self._inbound: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
@@ -176,8 +158,6 @@ class AudioBridge:
         self.send_audio_to_gemini: Callable[[bytes], Awaitable[None]] | None = None
         self.notify_page_flush: Callable[[int], Awaitable[None]] | None = None
         self.on_state: Callable[[str], None] = lambda state: None
-        # Called on stale/hard drops: the humans never heard that response, and
-        # the model doesn't know — the runtime tells it once the floor is free.
         self.on_forced_drop: Callable[[str], None] | None = None
 
     @property
@@ -262,10 +242,9 @@ class AudioBridge:
         self.on_state("listening")
 
     def force_drop(self, reason: str) -> None:
-        """Stale drop / hard stop: discard this response, including its unsent tail."""
-        # Counts as "overlap handled" for the watchdog, and discard must be
-        # STICKY: a re-fired drop with _turn_open already False must not clear
-        # it, or the killed generation's tail plays back as a fresh turn.
+        """Stale drop / hard stop: discard this response, including its unsent tail.
+        Idempotent under watchdog re-fires: discard stays sticky, and the drop
+        counts as a handled overlap."""
         self.last_interrupt_mono = time.monotonic()
         epoch_before = self.buffer.epoch
         dropped = self.buffer.flush()
@@ -283,8 +262,7 @@ class AudioBridge:
             asyncio.get_running_loop().create_task(self.notify_page_flush(self.buffer.epoch))
 
     def clear_speech_anchor(self) -> None:
-        """A text nudge (not user speech) is about to cause the next model turn:
-        the latency tracker must not attribute it to stale speech."""
+        """Next turn is nudge-caused, not speech-caused; fix latency attribution."""
         self._latency.clear_anchor()
 
 
@@ -343,9 +321,9 @@ class Pacer:
 
             self._seq += 1
             delivered = await self._send(epoch, self._seq, chunk)
-            if not delivered:
-                # No page connected: drain at realtime pace so state stays sane.
-                self._bus.emit("pacer.no_page", epoch=epoch) if self._seq % 50 == 1 else None
+            if not delivered and self._seq % 50 == 1:
+                # no page connected; keep draining at realtime pace
+                self._bus.emit("pacer.no_page", epoch=epoch)
             self._last_send_mono = self._clock()
             self._sent_ms += len(chunk) / OUT_BYTES_PER_MS
 
