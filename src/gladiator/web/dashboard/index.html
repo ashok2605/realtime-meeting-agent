@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Gladiator — Mission Control</title>
+<style>
+  :root {
+    --bg:#0b0e14; --panel:#121722; --border:#1f2735; --text:#dfe4ee; --dim:#7c8698;
+    --green:#3ba55d; --amber:#e8b93e; --blue:#4f8ff7; --red:#c75146; --purple:#9b6ef3;
+    --mono:'SF Mono',Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.45 -apple-system,'Helvetica Neue',Arial,sans-serif; }
+  header { display:flex; align-items:center; gap:14px; padding:10px 18px;
+           border-bottom:1px solid var(--border); position:sticky; top:0;
+           background:var(--bg); z-index:5; flex-wrap:wrap; }
+  header h1 { font-size:16px; letter-spacing:5px; font-weight:300; margin:0; }
+  .chip { padding:2px 10px; border-radius:20px; border:1px solid var(--border);
+          font:12px var(--mono); color:var(--dim); }
+  .chip b { color:var(--text); font-weight:600; }
+  .chip.ok b { color:var(--green); } .chip.warn b { color:var(--amber); }
+  .chip.bad b { color:var(--red); }
+  .spacer { flex:1; }
+  button { background:#1a2233; color:var(--text); border:1px solid var(--border);
+           border-radius:6px; padding:5px 12px; cursor:pointer; font-size:12px; }
+  button:hover { background:#232e45; }
+  button.danger { border-color:#5c2a24; color:#e08a80; }
+  main { display:grid; grid-template-columns:minmax(340px,1.1fr) minmax(300px,1fr) minmax(360px,1.2fr);
+         gap:12px; padding:12px 18px; align-items:start; }
+  section { background:var(--panel); border:1px solid var(--border);
+            border-radius:10px; padding:12px 14px; }
+  section h2 { margin:0 0 10px; font-size:11px; text-transform:uppercase;
+               letter-spacing:2px; color:var(--dim); font-weight:600; }
+  .q { border-top:1px solid var(--border); padding:8px 2px; }
+  .q:first-of-type { border-top:none; }
+  .qhead { display:flex; gap:8px; align-items:baseline; }
+  .qstatus { font:10px var(--mono); padding:1px 7px; border-radius:10px;
+             text-transform:uppercase; flex-shrink:0; }
+  .qstatus.pending { background:#1a2233; color:var(--dim); }
+  .qstatus.asked { background:#2a2a15; color:var(--amber); }
+  .qstatus.partial { background:#2a2115; color:#e09c5c; }
+  .qstatus.answered { background:#14281c; color:var(--green); }
+  .qstatus.skipped { background:#281414; color:var(--red); }
+  .qlabel { font-weight:600; font-size:13px; }
+  .qskip { margin-left:auto; font-size:10px; padding:1px 7px; opacity:.55; }
+  .qanswer { color:var(--dim); font-size:12px; margin:3px 0 0 2px; }
+  .qanswer b { color:var(--text); font-weight:500; }
+  .qquote { color:#5b98e8; font-style:italic; font-size:11px; }
+  #transcript { max-height:46vh; overflow-y:auto; display:flex;
+                flex-direction:column; gap:6px; font-size:13px; }
+  .line { padding:5px 9px; border-radius:8px; max-width:95%; }
+  .line.user { background:#18202f; align-self:flex-start; }
+  .line.agent { background:#12263e; align-self:flex-end; }
+  .line .who { font:10px var(--mono); color:var(--dim); display:block; }
+  .orbmini { width:11px; height:11px; border-radius:50%; display:inline-block;
+             margin-right:6px; background:var(--dim); vertical-align:-1px; }
+  .orbmini.listening { background:var(--green); } .orbmini.thinking { background:var(--amber); }
+  .orbmini.speaking { background:var(--blue); } .orbmini.holding { background:var(--red); }
+  #waterfalls { display:flex; flex-direction:column; gap:7px; }
+  .wf { font:11px var(--mono); }
+  .wfbar { display:flex; height:14px; border-radius:4px; overflow:hidden;
+           background:#0d1119; margin-top:2px; }
+  .wfseg { height:100%; }
+  .wfseg.detect { background:var(--amber); } .wfseg.serve { background:var(--purple); }
+  .wfseg.transit { background:var(--blue); }
+  .legend { font:10px var(--mono); color:var(--dim); margin-bottom:6px; }
+  .legend i { display:inline-block; width:9px; height:9px; border-radius:2px;
+              margin:0 4px 0 10px; vertical-align:-1px; }
+  table.stats { width:100%; border-collapse:collapse; font:12px var(--mono); }
+  table.stats td, table.stats th { padding:3px 6px; text-align:right;
+                                   border-top:1px solid var(--border); }
+  table.stats th { color:var(--dim); font-weight:400; }
+  table.stats td:first-child, table.stats th:first-child { text-align:left; }
+  #eventlog { max-height:34vh; overflow-y:auto; font:11px var(--mono); }
+  .ev { display:flex; gap:8px; padding:2px 0; border-top:1px solid #151b28;
+        white-space:nowrap; }
+  .ev .t { color:#4a5468; flex-shrink:0; }
+  .ev .ty { color:var(--blue); flex-shrink:0; min-width:150px; }
+  .ev .d { color:var(--dim); overflow:hidden; text-overflow:ellipsis; }
+  .ev.warn .ty { color:var(--amber); } .ev.err .ty { color:var(--red); }
+  input[type=text] { background:#0d1119; border:1px solid var(--border);
+                     color:var(--text); border-radius:6px; padding:4px 8px;
+                     font:11px var(--mono); width:150px; }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
+  @media (max-width:1100px){ main { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>GLADIATOR</h1>
+  <span class="chip" id="chip-face"><span class="orbmini" id="orbmini"></span><b id="face">idle</b></span>
+  <span class="chip" id="chip-bot">bot <b id="bot-status">–</b></span>
+  <span class="chip" id="chip-gemini">gemini <b id="gemini-status">–</b></span>
+  <span class="chip" id="chip-page">page <b id="page-status">–</b></span>
+  <span class="chip">phase <b id="phase">intro</b></span>
+  <span class="chip">speaking <b id="speaking">–</b></span>
+  <span class="chip">tokens <b id="tokens">0</b></span>
+  <span class="spacer"></span>
+  <button id="btn-greet">Greet</button>
+  <button id="btn-nudge">Nudge</button>
+  <button id="btn-mute">Mute agent</button>
+  <button id="btn-download">Download log</button>
+  <button id="btn-leave" class="danger">Leave meeting</button>
+</header>
+<main>
+  <section>
+    <h2>Discovery questions <span id="qprogress" style="float:right"></span></h2>
+    <div id="questions"></div>
+  </section>
+  <section>
+    <h2>Live transcript</h2>
+    <div id="transcript"></div>
+  </section>
+  <div style="display:flex; flex-direction:column; gap:12px;">
+    <section>
+      <h2>Latency — per-turn waterfall</h2>
+      <div class="legend">scale: <span id="wfscale">2000</span>ms
+        <i style="background:var(--amber)"></i>detect+think
+        <i style="background:var(--purple)"></i>gate+serve
+        <i style="background:var(--blue)"></i>transit+play
+      </div>
+      <div id="waterfalls"></div>
+      <table class="stats" id="latstats">
+        <tr><th>segment</th><th>last</th><th>p50</th><th>p95</th></tr>
+      </table>
+    </section>
+    <section>
+      <h2>Event log</h2>
+      <div class="row">
+        <input type="text" id="evfilter" placeholder="filter (e.g. gate.)">
+        <label style="font-size:11px;color:var(--dim)">
+          <input type="checkbox" id="evfollow" checked> follow</label>
+        <span class="chip">events <b id="evcount">0</b></span>
+      </div>
+      <div id="eventlog"></div>
+    </section>
+  </div>
+</main>
+<script src="/static/dashboard/dashboard.js"></script>
+</body>
+</html>
