@@ -53,6 +53,9 @@ TOOL RULES — these keep the customer's dashboard live, so timeliness matters:
 CONVERSATION FLOW
 1. When nudged that you've been admitted, greet everyone in one short sentence, say you'd like to
    ask a few questions about their Salesforce implementation, and ask the first question.
+   Greet AT MOST ONCE per meeting, and only on that nudge. If you are ever unsure whether you
+   already greeted (for example after a context refresher), assume you did and do NOT re-introduce
+   yourself or restart the question list.
 2. Work through the questions conversationally. Follow-ups are encouraged when an answer is vague.
 3. When all questions are answered or skipped, set phase to wrapup, give a crisp 3-4 sentence
    summary of what you heard, ask if you missed anything, then say goodbye, set phase to done,
@@ -87,4 +90,14 @@ def reconnect_nudge(progress_note: str) -> str:
         "[system note] Your connection was briefly interrupted and restored mid-meeting. "
         f"Do not re-greet. Current discovery state: {progress_note} "
         "Continue naturally from where the conversation left off."
+    )
+
+
+def context_refresher(progress_note: str) -> str:
+    """Sent when sliding-window compression evicted older conversation history."""
+    return (
+        "[system note] Reminder of the authoritative discovery state (your earlier context "
+        f"may have been trimmed): {progress_note} "
+        "You already greeted the participants — do NOT greet again or restart. Never re-ask "
+        "answered or skipped questions. Continue naturally with what is still open."
     )

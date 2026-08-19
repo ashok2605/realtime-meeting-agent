@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     gate_max_hold_ms: int = 20000   # stuck speech_on safety valve
     gate_hard_stop_ms: int = 400    # sustained human speech over agent audio -> force flush
 
+    # --- context management ---
+    # Sliding-window compression keeps sessions alive past Gemini's 15-min audio
+    # cap. Audio accrues ~25 tokens/sec per direction, so small windows (the
+    # docs' 25k/8k cost example) evict live conversation within minutes — seen
+    # in testing as mid-call amnesia (re-greeting, re-asking skipped questions).
+    # 100k/64k on a 131k-context model leaves compression as a >60-min safety
+    # net instead of an active participant.
+    compression_trigger_tokens: int = 100_000
+    compression_target_tokens: int = 64_000
+
     # --- tools ---
     # "native": google_search inside the Live session (verified working on this key).
     # "function": own web_search declaration backed by a grounded generateContent call.

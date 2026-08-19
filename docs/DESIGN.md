@@ -109,8 +109,20 @@ closes a healthy session; the loop must re-enter it forever.
 Gemini Live sessions die at 15 minutes (audio-only) and connections recycle ~every 10 minutes.
 Both mitigations are on:
 
-- `context_window_compression` (sliding window, trigger 25k → target 8k tokens): removes the
-  15-min cap and bounds per-turn re-billing (Live re-processes accumulated context each turn).
+- `context_window_compression` (sliding window, trigger 100k → target 64k on a 131k-context
+  model): removes the 15-min cap and bounds per-turn re-billing (Live re-processes accumulated
+  context each turn). **Sizing matters more than the docs suggest**: their 25k/8k cost example,
+  tried first, evicted live conversation every ~2 minutes of audio (~25 tokens/sec/direction) —
+  observed in testing as mid-call amnesia: the model re-greeted, re-asked skipped questions, and
+  once answered its own question in the customer's voice. At 100k/64k compression is a >60-min
+  safety net instead of an active participant.
+- **Compression amnesia detection + re-anchoring**: eviction is silent, but its fingerprint is a
+  sharp drop in `usage_metadata.total_token_count` between turns. On a drop >1.5k the session
+  emits `gemini.context_compressed` and (rate-limited to 1/min) injects a context-refresher note
+  built from `DiscoveryTracker.progress_note()` — the server-side state is authoritative and
+  survives anything, so the model is re-told what's answered/skipped/open and that it must not
+  re-greet. The same guardrail is in the system instruction ("greet at most once; when unsure,
+  assume you already did").
 - `session_resumption`: the rolling handle is kept; on `GoAway` (60 s warning) or socket close the
   run-loop reconnects with it. If a handle goes stale after repeated failures it's dropped and a
   fresh session is re-seeded with `DiscoveryTracker.progress_note()` — a compact "answered /

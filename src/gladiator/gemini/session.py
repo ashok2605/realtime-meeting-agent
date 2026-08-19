@@ -14,6 +14,7 @@ with a compact discovery-state note.
 from __future__ import annotations
 
 import asyncio
+import time
 
 from google import genai
 from google.genai import types
@@ -23,7 +24,7 @@ from ..audio.bridge import AudioBridge
 from ..config import Settings
 from ..core.discovery import DiscoveryTracker
 from ..core.events import EventBus
-from .prompts import GREETING_NUDGE, reconnect_nudge, system_instruction
+from .prompts import GREETING_NUDGE, context_refresher, reconnect_nudge, system_instruction
 from .tools import ToolDispatcher, build_declarations
 
 
@@ -43,6 +44,10 @@ class GeminiSession:
         self._greeted = False
         self._greeting_pending = False
         self.reconnects = 0
+        # Compression-amnesia detection: usage totals normally grow within a
+        # session; a large drop means the sliding window evicted history.
+        self._last_total_tokens: int | None = None
+        self._last_reanchor_mono = 0.0
 
     @property
     def greeted(self) -> bool:
@@ -75,8 +80,8 @@ class GeminiSession:
                     silence_duration_ms=s.vad_silence_duration_ms,
                 )),
             context_window_compression=types.ContextWindowCompressionConfig(
-                trigger_tokens=25_000,
-                sliding_window=types.SlidingWindow(target_tokens=8_000)),
+                trigger_tokens=s.compression_trigger_tokens,
+                sliding_window=types.SlidingWindow(target_tokens=s.compression_target_tokens)),
             session_resumption=types.SessionResumptionConfig(handle=self._resumption_handle),
             thinking_config=types.ThinkingConfig(thinking_level="minimal"),
         )
@@ -91,6 +96,7 @@ class GeminiSession:
                         config=self._build_config()) as session:
                     self._session = session
                     backoff = 0.5
+                    self._last_total_tokens = None  # fresh counter per connection
                     self._bus.emit("gemini.connected",
                                    model=self._settings.gemini_model,
                                    reconnects=self.reconnects,
@@ -186,6 +192,28 @@ class GeminiSession:
         if msg.usage_metadata is not None:
             um = msg.usage_metadata
             self._bus.emit("gemini.usage", total_tokens=um.total_token_count)
+            self._check_context_compression(um.total_token_count)
+
+    def _check_context_compression(self, total_tokens: int | None) -> None:
+        """Sliding-window compression silently evicts conversation history —
+        observed in testing as mid-call amnesia (re-greeting, re-asking skipped
+        questions). A big drop in the per-turn token total is its fingerprint;
+        respond by re-anchoring the model with the server-side discovery state,
+        which compression can never touch. Rate-limited to once a minute."""
+        if total_tokens is None:
+            return
+        prev = self._last_total_tokens
+        self._last_total_tokens = total_tokens
+        if prev is None or prev - total_tokens < 1_500:
+            return
+        self._bus.emit("gemini.context_compressed", before=prev, after=total_tokens)
+        now = time.monotonic()
+        if now - self._last_reanchor_mono < 60:
+            return
+        self._last_reanchor_mono = now
+        asyncio.get_running_loop().create_task(
+            self.send_text(context_refresher(self._tracker.progress_note())))
+        self._bus.emit("gemini.context_reanchored")
 
     async def _finish_deferred(self, fc: types.FunctionCall,
                                session: genai.live.AsyncSession) -> None:
