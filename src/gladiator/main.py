@@ -147,17 +147,21 @@ async def cmd_doctor() -> int:
         if not ok:
             print("         -> set SEARCH_MODE=function in .env to use the web_search fallback")
 
-    # Tunnel
+    # Tunnel — only meaningful while the demo stack is up: run_demo.sh starts
+    # ngrok + the server itself, so an offline endpoint here is informational.
     if settings.public_base_url:
         try:
             async with httpx.AsyncClient(timeout=10) as http:
                 r = await http.get(f"{settings.public_base_url}/healthz")
-            report("tunnel -> local server", r.status_code == 200,
-                   settings.public_base_url)
+            if r.status_code == 200:
+                report("tunnel -> local server", True, settings.public_base_url)
+            else:
+                print(f"  [INFO] tunnel endpoint offline ({settings.public_base_url}, "
+                      f"HTTP {r.status_code}) — normal when the demo isn't running; "
+                      "run_demo.sh brings it up")
         except Exception:
-            report("tunnel -> local server", False,
-                   f"{settings.public_base_url}/healthz unreachable (server not running yet is OK "
-                   "if you're about to use run_demo.sh)")
+            print(f"  [INFO] tunnel endpoint unreachable ({settings.public_base_url}) — "
+                  "normal when the demo isn't running; run_demo.sh brings it up")
     else:
         report("PUBLIC_BASE_URL set", False, "needed for a real meeting; fine for --local-test")
 
