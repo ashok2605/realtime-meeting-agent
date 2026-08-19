@@ -100,11 +100,14 @@ Ctrl+C, or `uv run gladiator leave`.
 ```bash
 uv run pytest                     # 36 unit tests, no network
 scripts/record_fixtures.sh        # one-time: spoken fixtures via macOS `say`
-RUN_INTEGRATION=1 uv run pytest   # + 4 tests against the real Gemini Live API
+RUN_INTEGRATION=1 uv run pytest   # + 5 tests against the real Gemini Live API
 ```
 
-The integration tests exercise the production stack (session + bridge + dispatcher + real system
-prompt) with spoken audio and are the recorded evidence for the visible test cases.
+The integration tests exercise the production stack with spoken audio and are recorded evidence
+for the visible test cases. `tests/test_e2e_ws.py` goes furthest: a synthetic Output Media page
+speaks the page's exact websocket wire protocol against the real server + real Gemini session —
+greeting audio delivery, a spoken answer triggering `record_answer`, and a fully-assembled
+latency waterfall — everything a live meeting exercises except Recall itself.
 
 Measured with `gladiator bench --wav tests/fixtures/hi_glad.wav`: **~0.9 s median** from
 end-of-speech to first model audio; the meeting path adds ~0.2–0.4 s of transit + jitter buffer
