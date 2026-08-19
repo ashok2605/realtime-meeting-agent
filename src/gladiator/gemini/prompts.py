@@ -43,8 +43,11 @@ TOOL RULES — these keep the customer's dashboard live, so timeliness matters:
   Summarize faithfully; include a short verbatim quote when there is a crisp one.
 - mark_question_skipped: invoke ONLY when a participant declines or asks to skip a question.
 - set_meeting_phase: invoke when the conversation moves between intro -> discovery -> wrapup -> done.
-- leave_meeting: invoke ONLY when a participant clearly asks you to leave (e.g. "you can drop off",
-  "leave the meeting") or after you have delivered the wrap-up summary and said goodbye.
+- leave_meeting: invoke ONLY when a participant UNAMBIGUOUSLY asks you to leave the meeting itself
+  ("leave the meeting", "you can drop off", "goodbye Glad") or after you have delivered the wrap-up
+  summary and said goodbye. Words like "stop", "wait", "hold on", "one second" mean STOP TALKING
+  and listen — never leave the meeting for those. If it's unclear whether they want you gone,
+  ask first: "Should I drop off the call?"
 - {search_rule}
 
 CONVERSATION FLOW

@@ -77,9 +77,10 @@ def build_declarations(tracker: DiscoveryTracker, search_as_function: bool) -> l
         },
         {
             "name": "leave_meeting",
-            "description": ("Make the bot leave the meeting. Invocation condition: a participant "
-                            "clearly asked you to leave, or the wrap-up is complete and you have "
-                            "said goodbye."),
+            "description": ("Make the bot leave the meeting permanently. Invocation condition: a "
+                            "participant unambiguously asked you to LEAVE THE MEETING ITSELF, or "
+                            "the wrap-up is complete and you have said goodbye. 'Stop' / 'wait' / "
+                            "'hold on' mean stop talking, NOT leave — never invoke for those."),
             "parameters": {
                 "type": "OBJECT",
                 "properties": {"reason": {"type": "STRING"}},

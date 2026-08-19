@@ -264,13 +264,26 @@ class Runtime:
         self.bus.emit("runtime.leave_scheduled", reason=reason)
 
         async def _leave() -> None:
-            if self.bot_id:
-                # Let the goodbye finish playing out of the page buffer first.
-                await asyncio.sleep(3.0)
-                try:
-                    await self.recall.leave(self.bot_id)
-                except Exception as exc:
-                    self.bus.emit("recall.leave_error", error=str(exc)[:200])
+            if not self.bot_id:
+                return
+            # Don't yank the bot mid-goodbye: wait for the farewell audio to
+            # start (it's generated in the same turn as the tool call), then
+            # for it to fully drain — bounded so a leave can never hang.
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 4.0:
+                if self.pacer.agent_playing or self.bridge.buffer.buffered_ms > 0:
+                    break
+                await asyncio.sleep(0.1)
+            while time.monotonic() - t0 < 20.0:
+                if not self.pacer.agent_playing and self.bridge.buffer.buffered_ms == 0:
+                    break
+                await asyncio.sleep(0.2)
+            self.bus.emit("runtime.leave_playout_done",
+                          waited_ms=round((time.monotonic() - t0) * 1000, 1))
+            try:
+                await self.recall.leave(self.bot_id)
+            except Exception as exc:
+                self.bus.emit("recall.leave_error", error=str(exc)[:200])
 
         asyncio.get_running_loop().create_task(_leave())
 
