@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     hybrid_vad: bool = False
 
     # --- floor gate (agent must never interrupt a human) ---
+    # Gate on the EnergyVAD of the live meeting audio (primary signal; Recall's
+    # speech events barely fire in small meetings). Disable only if a room's
+    # speakers leak agent audio back into the meeting mic.
+    vad_gate: bool = True
     gate_grace_ms: int = 300        # silence required before agent may start speaking
     gate_stale_drop_ms: int = 2500  # gate held longer than this -> drop buffered answer
     gate_max_hold_ms: int = 20000   # stuck speech_on safety valve

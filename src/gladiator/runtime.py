@@ -44,11 +44,15 @@ class Runtime:
         self.latency = LatencyTracker(self.bus)
         self.tracker = DiscoveryTracker(self.bus)
         self.speech = SpeechState(bot_name=settings.bot_name)
+        self.bridge = AudioBridge(self.bus, self.latency, chunk_ms=settings.outbound_chunk_ms)
+        # EnergyVAD is the gate's primary signal (Recall speech events barely
+        # fire in small meetings — see DESIGN.md §4); vad_gate=false reverts to
+        # events-only if a room's speakers ever leak agent audio into the mic.
         self.gate = FloorGate(self.speech, self.bus,
                               grace_ms=settings.gate_grace_ms,
                               stale_drop_ms=settings.gate_stale_drop_ms,
-                              max_hold_ms=settings.gate_max_hold_ms)
-        self.bridge = AudioBridge(self.bus, self.latency, chunk_ms=settings.outbound_chunk_ms)
+                              max_hold_ms=settings.gate_max_hold_ms,
+                              vad=self.bridge.vad if settings.vad_gate else None)
         self.dispatcher = ToolDispatcher(
             self.tracker, self.bus,
             request_leave=self._request_leave,
@@ -288,21 +292,37 @@ class Runtime:
         asyncio.get_running_loop().create_task(_leave())
 
     # ----------------------------------------------------------- background
+    def _hard_stop_due(self) -> float | None:
+        """Overlap in ms if a human has been talking over playing agent audio
+        for >= gate_hard_stop_ms with no interruption handled yet, else None.
+        Considers both signals: Recall speech events and the meeting-audio VAD."""
+        if not self.pacer.agent_playing:
+            return None
+        hard_stop_s = self.settings.gate_hard_stop_ms / 1000
+        since_candidates = [s.since_mono for s in self.speech.speaking.values()]
+        vad = self.bridge.vad
+        if self.settings.vad_gate and vad.in_voice and vad.voice_since is not None:
+            since_candidates.append(vad.voice_since)
+        if not since_candidates:
+            return None
+        earliest = min(since_candidates)
+        now = time.monotonic()
+        if now - earliest >= hard_stop_s and self.bridge.last_interrupt_mono < earliest:
+            return (now - earliest) * 1000
+        return None
+
     async def _hard_stop_watchdog(self) -> None:
         """Belt-and-suspenders for 'never talk over a human': if a human has been
         speaking over agent audio for gate_hard_stop_ms and Gemini hasn't sent
         `interrupted`, force-drop the response ourselves."""
-        hard_stop_s = self.settings.gate_hard_stop_ms / 1000
         while True:
             await asyncio.sleep(0.1)
-            if not self.pacer.agent_playing or not self.speech.any_human_speaking():
-                continue
-            earliest = min(s.since_mono for s in self.speech.speaking.values())
-            now = time.monotonic()
-            if now - earliest >= hard_stop_s and self.bridge.last_interrupt_mono < earliest:
+            overlap_ms = self._hard_stop_due()
+            if overlap_ms is not None:
                 self.bus.emit("gate.hard_stop",
                               speaking=self.speech.snapshot()["speaking"],
-                              overlap_ms=round((now - earliest) * 1000, 1))
+                              vad_voice=self.bridge.vad.in_voice,
+                              overlap_ms=round(overlap_ms, 1))
                 self.bridge.force_drop("hard_stop")
 
     async def _silence_nudger(self, silence_s: float = 45.0) -> None:

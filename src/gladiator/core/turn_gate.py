@@ -1,10 +1,15 @@
 """Turn-taking floor control: the agent must never talk over a human.
 
-SpeechState tracks which *named human participants* are currently speaking,
-fed by Recall's speaker-attributed participant_events.speech_on/speech_off.
-This is deliberately independent of Gemini's VAD: it survives echo, background
-noise, and other bots, and it's the signal that makes "never interrupts" a
-guarantee rather than a probability.
+Two independent signals feed the gate:
+
+1. **EnergyVAD on the live meeting audio** (primary). Continuous and truthful;
+   empirically verified to exclude the bot's own voice. Added after the first
+   live rehearsal showed signal 2 is nearly absent in small meetings.
+2. **Recall's participant_events.speech_on/off** (secondary + attribution).
+   Speaker-named, but in a single-participant Google Meet the active-speaker
+   signal barely fires (observed: one speech_on, zero speech_off in 4 min).
+   Still valuable in multi-participant calls and for the dashboard's
+   "who is speaking" display.
 
 FloorGate is what the Pacer consults before releasing each audio chunk:
 
@@ -24,11 +29,20 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from .events import EventBus
 
 OPEN = "open"
 DROP = "drop"
+
+
+class VoiceSignal(Protocol):
+    """Duck type for EnergyVAD (kept abstract to avoid an import cycle)."""
+
+    in_voice: bool
+
+    def last_quiet_mono(self) -> float | None: ...
 
 
 @dataclass
@@ -100,8 +114,10 @@ class SpeechState:
 class FloorGate:
     def __init__(self, speech: SpeechState, bus: EventBus, *,
                  grace_ms: int, stale_drop_ms: int, max_hold_ms: int,
+                 vad: VoiceSignal | None = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._speech = speech
+        self._vad = vad
         self._bus = bus
         self._grace_s = grace_ms / 1000
         self._stale_drop_s = stale_drop_ms / 1000
@@ -109,9 +125,23 @@ class FloorGate:
         self._clock = clock
         self.last_hold_ms: float = 0.0
 
+    def _vad_speaking(self) -> bool:
+        return self._vad is not None and self._vad.in_voice
+
+    def _silence_duration(self) -> float:
+        """Seconds since BOTH signals last reported a quiet room."""
+        last = self._speech.last_speech_off_mono
+        if self._vad is not None:
+            quiet = self._vad.last_quiet_mono()
+            if quiet is None:
+                return 0.0  # voice active right now
+            last = max(last, quiet)
+        return self._clock() - last
+
     def is_open(self) -> bool:
         return (not self._speech.any_human_speaking()
-                and self._speech.silence_duration() >= self._grace_s)
+                and not self._vad_speaking()
+                and self._silence_duration() >= self._grace_s)
 
     async def wait_for_floor(self) -> str:
         """Block until the agent may speak. Returns OPEN, or DROP if the wait
@@ -133,11 +163,13 @@ class FloorGate:
             if held >= self._stale_drop_s:
                 self.last_hold_ms = held * 1000
                 self._bus.emit("gate.stale_drop", held_ms=round(self.last_hold_ms, 1),
-                               speaking=self._speech.snapshot()["speaking"])
+                               speaking=self._speech.snapshot()["speaking"],
+                               vad_voice=self._vad_speaking())
                 return DROP
 
             if not held_logged:
-                self._bus.emit("gate.hold", speaking=self._speech.snapshot()["speaking"])
+                self._bus.emit("gate.hold", speaking=self._speech.snapshot()["speaking"],
+                               vad_voice=self._vad_speaking())
                 held_logged = True
 
             # Wake on speech-state change, or poll to re-check grace/stale deadlines.

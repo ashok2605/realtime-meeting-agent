@@ -14,7 +14,7 @@ with per-turn latency waterfalls and a full structured event log.
 | 5–10 preset discovery questions | 8 questions in `core/discovery.py`, worked through conversationally | dashboard checklist |
 | Dashboard updated via tool calls | `record_answer` / `mark_question_asked` / `mark_question_skipped` / `set_meeting_phase` function declarations | `::test_spoken_answer_triggers_record_answer_tool` |
 | Web search | `google_search` grounding inside the Live session (combined-tools config verified against the real API by `gladiator doctor`) | `::test_web_search_used_when_asked` |
-| Glad never interrupts a speaker | `FloorGate` on Recall's speaker-attributed `speech_on/off` events + grace period + stale-drop + hard-stop watchdog | `tests/test_turn_gate.py`, `tests/test_stale_policy.py` |
+| Glad never interrupts a speaker | `FloorGate` on two signals — EnergyVAD over the live meeting audio (primary) + Recall's speaker-attributed `speech_on/off` — with grace period, stale-drop, and a hard-stop watchdog | `tests/test_turn_gate.py`, `tests/test_vad_gate.py`, `tests/test_stale_policy.py` |
 | Anyone can interrupt Glad | Gemini VAD barge-in → `interrupted` → server buffer epoch-flush + page buffer flush in one hop | `::test_barge_in_interrupts_and_flushes`, `tests/test_receive_loop.py` |
 | Smooth, non-jittery audio | AudioWorklet playback (sample-accurate), server-side pacer with a ~160 ms primed jitter buffer, `web_4_core` bot | `tests/test_latency.py::test_pacer_keeps_bounded_head_start` |
 

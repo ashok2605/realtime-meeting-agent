@@ -90,23 +90,34 @@ class TurnAudioBuffer:
 
 
 class EnergyVAD:
-    """Cheap RMS voice detector on inbound frames.
+    """RMS voice detector on the inbound meeting audio.
 
-    Not a gate — Recall speech events own gating. This anchors latency
-    measurement at the true last-voiced frame, and feeds the dashboard level
-    meter. Hangover keeps normal pauses from counting as speech-end.
+    This is the PRIMARY floor-gate signal: the first live rehearsal showed
+    Recall's speech_on/off events are nearly absent in a single-participant
+    Meet (one speech_on, zero speech_off in 4 minutes), while the meeting
+    audio itself is always truthful — and verified to exclude the bot's own
+    voice (RMS was zero during every agent turn). Also anchors latency
+    measurement at the true last-voiced frame. Hangover keeps normal pauses
+    from counting as speech-end.
     """
 
     def __init__(self, threshold: int = 500, hangover_ms: int = 300,
                  on_speech_end: Callable[[float], None] | None = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._threshold = threshold
-        self._hangover_s = hangover_ms / 1000
+        self.hangover_s = hangover_ms / 1000
         self.on_speech_end = on_speech_end  # reassignable: runtime layers hooks on it
         self._clock = clock
         self.in_voice = False
         self.last_voice_mono: float | None = None
+        self.voice_since: float | None = None  # start of the current utterance
         self.last_rms = 0
+
+    def last_quiet_mono(self) -> float | None:
+        """When the room last became quiet (voice end + hangover); None if speaking."""
+        if self.in_voice or self.last_voice_mono is None:
+            return None if self.in_voice else -1e9
+        return self.last_voice_mono + self.hangover_s
 
     @staticmethod
     def _rms(pcm: bytes) -> int:
@@ -121,11 +132,14 @@ class EnergyVAD:
         now = self._clock()
         self.last_rms = self._rms(pcm)
         if self.last_rms >= self._threshold:
+            if not self.in_voice:
+                self.voice_since = now
             self.in_voice = True
             self.last_voice_mono = now
         elif self.in_voice and self.last_voice_mono is not None \
-                and now - self.last_voice_mono >= self._hangover_s:
+                and now - self.last_voice_mono >= self.hangover_s:
             self.in_voice = False
+            self.voice_since = None
             if self.on_speech_end is not None:
                 self.on_speech_end(self.last_voice_mono)
 

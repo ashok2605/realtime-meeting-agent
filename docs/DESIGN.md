@@ -60,13 +60,27 @@ is told to drop its worklet queue. Because the page holds ≤ ~200 ms, cutoff is
 Tested: `test_interrupted_processed_instantly_with_saturated_backlog` (flush happens in <50 ms
 even with 60 s of undelivered audio queued).
 
-**Glad never interrupts humans (correctness-critical):** an independent outer gate that does not
-trust VAD on a mixed signal. `SpeechState` tracks *named human participants* currently speaking
-from Recall's speaker-attributed `speech_on`/`speech_off` events (the bot's own name is filtered);
-the Pacer consults `FloorGate` before every 40 ms chunk:
+**Glad never interrupts humans (correctness-critical):** an independent outer gate fed by **two
+signals**, consulted by the Pacer before every 40 ms chunk:
 
-- **grace** (300 ms): silence required before the agent may begin speaking — covers the gap
-  between VAD-perceived and event-perceived speech end.
+1. *EnergyVAD on the live meeting audio* — **primary**. Continuous and truthful. Added after the
+   first live rehearsal falsified the original events-only design: in a single-participant Google
+   Meet, Recall delivered exactly one `speech_on` and zero `speech_off` in 4 minutes (Meet's
+   active-speaker signal never switches away from a lone speaker), which first held the gate on a
+   phantom speaker for 45 s (dropping the greeting as stale) and then, after the stuck-speaker
+   prune, left the gate wide open for the rest of the call. The same rehearsal's logs proved the
+   page's mic feed excludes the bot's own voice (input RMS was zero during every agent turn), so
+   VAD-gating cannot self-block. `VAD_GATE=false` reverts to events-only for the one setup that
+   could break this: a room whose speakers leak agent audio back into the meeting mic.
+2. *Recall's `speech_on`/`speech_off`* — secondary signal and the source of speaker attribution
+   (dashboard "who is speaking"; the bot's own name is filtered). Reliable only with multiple
+   participants.
+
+Gate mechanics:
+
+- **grace** (300 ms): silence on BOTH signals required before the agent may begin speaking
+  (on the VAD side this stacks on its 300 ms hangover — ~600 ms after the last voiced frame,
+  still inside Gemini's own 700 ms end-of-turn silence window, so it adds no user-visible delay).
 - **stale-drop** (2.5 s): if a response has been gated this long, the human has moved on; the
   buffered answer AND the still-streaming remainder of that generation are discarded
   (`_discarding` until the turn boundary). Gemini's own VAD normally also cancels the stale
@@ -74,8 +88,8 @@ the Pacer consults `FloorGate` before every 40 ms chunk:
   `test_interrupted_while_gate_held_flushes_before_release` — but we do not rely on it.
 - **max-hold** (20 s): a stuck `speech_on` (lost event, participant left mid-word) is pruned so
   the agent can't be muted forever; participant-leave also releases the floor.
-- **hard-stop watchdog** (400 ms): if a human has been talking over playing agent audio and no
-  `interrupted` arrived (e.g. echo-masked barge-in), we force-drop ourselves.
+- **hard-stop watchdog** (400 ms): if a human has been talking over playing agent audio (either
+  signal) and no `interrupted` arrived (e.g. echo-masked barge-in), we force-drop ourselves.
 
 Epochs make all of this race-free: every chunk carries its generation's epoch; a flush advances
 the epoch; Pacer and page discard stale-epoch chunks unconditionally.
