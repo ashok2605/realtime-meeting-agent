@@ -46,13 +46,17 @@ class Runtime:
         self.speech = SpeechState(bot_name=settings.bot_name)
         self.bridge = AudioBridge(self.bus, self.latency, chunk_ms=settings.outbound_chunk_ms)
         # EnergyVAD is the gate's primary signal (Recall speech events barely
-        # fire in small meetings — see DESIGN.md §4); vad_gate=false reverts to
-        # events-only if a room's speakers ever leak agent audio into the mic.
+        # fire in small meetings — see DESIGN.md §4), but ONLY on the page
+        # capture path, where "the mic excludes the bot's own voice" was
+        # verified empirically. The recall_ws fallback feeds a mixed stream
+        # that may include our own output — VAD authority there could make the
+        # bot silence itself. vad_gate=false also reverts to events-only.
+        self._vad_authoritative = settings.vad_gate and settings.audio_source == "page"
         self.gate = FloorGate(self.speech, self.bus,
                               grace_ms=settings.gate_grace_ms,
                               stale_drop_ms=settings.gate_stale_drop_ms,
                               max_hold_ms=settings.gate_max_hold_ms,
-                              vad=self.bridge.vad if settings.vad_gate else None)
+                              vad=self.bridge.vad if self._vad_authoritative else None)
         self.dispatcher = ToolDispatcher(
             self.tracker, self.bus,
             request_leave=self._request_leave,
@@ -84,7 +88,6 @@ class Runtime:
         self.face = "idle"
         self.page_ws: WebSocket | None = None
         self.page_capture_ok = False
-        self.dashboard_ws: set[WebSocket] = set()
         self._admitted = False
         self._last_nudge_mono = time.monotonic()
         self._greet_task: asyncio.Task | None = None
@@ -97,15 +100,32 @@ class Runtime:
         return bool(token) and hmac.compare_digest(token, self.settings.session_token)
 
     # ------------------------------------------------------------ lifecycle
+    def _supervise(self, coro_fn, name: str) -> asyncio.Task:
+        """Background tasks must not die silently: an uncaught exception is
+        logged and the task restarts (review finding: one transport error would
+        have permanently, invisibly killed a task like the re-anchor loop)."""
+        async def _run() -> None:
+            while True:
+                try:
+                    await coro_fn()
+                    return  # normal completion (e.g. reanchor after meeting end)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.bus.emit("runtime.task_error", task=name,
+                                  kind=type(exc).__name__, error=str(exc)[:300])
+                    await asyncio.sleep(1.0)
+        return asyncio.create_task(_run(), name=name)
+
     async def start(self, meeting_url: str | None) -> None:
         self._tasks = [
-            asyncio.create_task(self.session.run(), name="gemini"),
-            asyncio.create_task(self.pacer.run(), name="pacer"),
-            asyncio.create_task(self.bridge.inbound_sender(), name="inbound"),
-            asyncio.create_task(self.bridge.stats_reporter(), name="stats"),
-            asyncio.create_task(self._hard_stop_watchdog(), name="hardstop"),
-            asyncio.create_task(self._silence_nudger(), name="nudger"),
-            asyncio.create_task(self._periodic_reanchor(), name="reanchor"),
+            self._supervise(self.session.run, "gemini"),
+            self._supervise(self.pacer.run, "pacer"),
+            self._supervise(self.bridge.inbound_sender, "inbound"),
+            self._supervise(self.bridge.stats_reporter, "stats"),
+            self._supervise(self._hard_stop_watchdog, "hardstop"),
+            self._supervise(self._silence_nudger, "nudger"),
+            self._supervise(self._periodic_reanchor, "reanchor"),
         ]
         self.bus.emit("runtime.started", audio_source=self.settings.audio_source,
                       model=self.settings.gemini_model, run_dir=str(self.run_dir))
@@ -117,7 +137,7 @@ class Runtime:
                                "run_dir": str(self.run_dir)})
             (self.run_dir / "bot.json").write_text(info)
             (self.settings.runs_dir / "last_bot.json").write_text(info)
-            self._tasks.append(asyncio.create_task(self._poll_bot_status(), name="botpoll"))
+            self._tasks.append(self._supervise(self._poll_bot_status, "botpoll"))
 
     async def shutdown(self) -> None:
         if self.bot_id:
@@ -243,13 +263,28 @@ class Runtime:
         if self._greet_task is None or self._greet_task.done():
             self._greet_task = asyncio.create_task(self._greet_when_quiet())
 
+    async def _wait_for_quiet(self, max_wait_s: float, *,
+                              require_no_open_turn: bool = True) -> bool:
+        """The single definition of 'the bot may make noise now': floor open,
+        nothing playing, and (usually) no model generation in flight. Shared by
+        the greeting, drop-recovery, and re-anchor paths — three copies of this
+        loop diverged during review and one divergence was a live bug."""
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < max_wait_s:
+            quiet = self.gate.is_open() and not self.pacer.agent_playing
+            if quiet and require_no_open_turn:
+                quiet = not self.bridge.turn_open and self.bridge.buffer.buffered_ms == 0
+            if quiet:
+                return True
+            await asyncio.sleep(0.1)
+        return False
+
     async def _greet_when_quiet(self, max_wait_s: float = 20.0) -> None:
         """People usually ARE talking right when they admit the bot; a greeting
         requested then just gets stale-dropped and the bot seems mute (observed
         live). Wait for a quiet floor so the greeting actually plays."""
         t0 = time.monotonic()
-        while time.monotonic() - t0 < max_wait_s and not self.gate.is_open():
-            await asyncio.sleep(0.1)
+        await self._wait_for_quiet(max_wait_s)  # timeout -> greet anyway
         waited = round((time.monotonic() - t0) * 1000, 1)
         if waited > 200:
             self.bus.emit("runtime.greeting_waited_for_floor", waited_ms=waited)
@@ -267,16 +302,15 @@ class Runtime:
         while time.monotonic() - t0 < max_wait_s:
             if self.bridge.buffer.epoch != epoch_at_drop or self.bridge.turn_open:
                 return  # a newer generation superseded the dropped one
-            if self.gate.is_open() and not self.pacer.agent_playing:
+            if await self._wait_for_quiet(0.1):
                 break
-            await asyncio.sleep(0.1)
         else:
             return
         if time.monotonic() - self._last_drop_note_mono < 15:
             return
         self._last_drop_note_mono = time.monotonic()
-        self.bus.emit("runtime.dropped_response_note")
-        await self.session.send_text(DROPPED_RESPONSE_NUDGE)
+        if await self.session.send_text(DROPPED_RESPONSE_NUDGE):
+            self.bus.emit("runtime.dropped_response_note")
 
     # ------------------------------------------------------------- controls
     async def control(self, action: str, **kwargs: Any) -> dict[str, Any]:
@@ -337,18 +371,23 @@ class Runtime:
     def _hard_stop_due(self) -> float | None:
         """Overlap in ms if a human has been talking over playing agent audio
         for >= gate_hard_stop_ms with no interruption handled yet, else None.
-        VAD-authoritative when vad_gate is on (Recall speech events are
-        unreliable in small meetings — a stuck speech_on must not be able to
-        force-drop healthy agent speech); events-only otherwise."""
+
+        Safety-critical, so it takes the UNION of both signals: a live VAD
+        catches speech Recall never reports, and Recall events catch speakers
+        the VAD can't hear (soft voice below threshold, stalled feed). Stuck
+        phantom events are pruned first, so an ancient speech_on can't
+        force-drop healthy speech; a fresh false event costs at most one
+        dropped response, which the drop-recovery note restates — cheaper than
+        talking over a real human."""
         if not self.pacer.agent_playing:
             return None
         hard_stop_s = self.settings.gate_hard_stop_ms / 1000
+        self.speech.prune_stuck(self.settings.gate_max_hold_ms / 1000)
+        since_candidates = [s.since_mono for s in self.speech.speaking.values()]
         vad = self.bridge.vad
-        if self.settings.vad_gate:
-            since_candidates = ([vad.voice_since]
-                                if vad.in_voice and vad.voice_since is not None else [])
-        else:
-            since_candidates = [s.since_mono for s in self.speech.speaking.values()]
+        if (self._vad_authoritative and vad.in_voice and vad.voice_since is not None
+                and not vad.is_stale(self.gate.VAD_STALE_AFTER_S)):
+            since_candidates.append(vad.voice_since)
         if not since_candidates:
             return None
         earliest = min(since_candidates)
@@ -372,44 +411,48 @@ class Runtime:
                 self.bridge.force_drop("hard_stop")
 
     async def _silence_nudger(self, silence_s: float = 45.0) -> None:
-        """If the room goes quiet mid-discovery, gently re-engage (once per lull)."""
+        """If the room goes quiet mid-discovery, gently re-engage (once per lull).
+        'Activity' considers BOTH signals — review found this still keyed off
+        Recall-only events, which meant nudging into a monologue the VAD could
+        hear but Recall never reported."""
         while True:
             await asyncio.sleep(5)
             if not self._admitted or self.tracker.phase in ("wrapup", "done"):
                 continue
-            if self.speech.any_human_speaking() or self.pacer.agent_playing:
+            if (self.speech.any_human_speaking() or self.pacer.agent_playing
+                    or self.bridge.vad.in_voice):
                 continue
             last_activity = max(self.speech.last_speech_off_mono,
+                                self.bridge.vad.last_voice_mono or -1e9,
                                 self.pacer._last_send_mono,
                                 self._last_nudge_mono)
             if time.monotonic() - last_activity >= silence_s:
                 self._last_nudge_mono = time.monotonic()
-                self.bus.emit("runtime.silence_nudge")
-                await self.session.send_text(SILENCE_NUDGE)
+                if await self.session.send_text(SILENCE_NUDGE):
+                    self.bus.emit("runtime.silence_nudge")
 
     async def _periodic_reanchor(self) -> None:
         """Deterministic context maintenance: at a regular cadence, re-tell the
         model the authoritative discovery state (answered/skipped/open, already
-        greeted). Delivered at a quiet moment so it doesn't collide with anyone
-        speaking; the note itself instructs the model not to acknowledge it."""
+        greeted). Delivered only at a quiet moment with no generation in flight
+        (a text nudge is a user turn — landing it mid-generation cancels the
+        pending answer); never during wrap-up/goodbye, and stops for good once
+        the bot's meeting is over."""
         interval = self.settings.reanchor_interval_s
         if interval <= 0:
             return
         while True:
             await asyncio.sleep(interval)
+            if self.bot_id and self.bot_status in TERMINAL_STATUSES:
+                return  # meeting over; don't talk to an empty room forever
             if not (self._admitted and self.session.greeted):
                 continue
-            if self.tracker.phase == "done":
+            if self.tracker.phase in ("wrapup", "done"):
                 continue
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < 30:
-                if self.gate.is_open() and not self.pacer.agent_playing:
-                    break
-                await asyncio.sleep(0.5)
-            else:
-                continue  # never found a quiet moment; try next cycle
-            self.bus.emit("runtime.periodic_reanchor")
-            await self.session.send_text(context_refresher(self.tracker.progress_note()))
+            if not await self._wait_for_quiet(30):
+                continue  # lively room this cycle; try again next interval
+            if await self.session.send_text(context_refresher(self.tracker.progress_note())):
+                self.bus.emit("runtime.periodic_reanchor")
 
     def _on_speech_end(self, last_voice_mono: float) -> None:
         self.latency.mark_speech_end(last_voice_mono)
@@ -482,7 +525,6 @@ class Runtime:
 
     async def handle_dashboard_ws(self, ws: WebSocket) -> None:
         await ws.accept()
-        self.dashboard_ws.add(ws)
         queue = self.bus.subscribe()
         try:
             await ws.send_text(json.dumps({"type": "hello", "snapshot": self.snapshot()},
@@ -517,4 +559,3 @@ class Runtime:
             pass
         finally:
             self.bus.unsubscribe(queue)
-            self.dashboard_ws.discard(ws)

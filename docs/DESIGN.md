@@ -63,18 +63,22 @@ even with 60 s of undelivered audio queued).
 **Glad never interrupts humans (correctness-critical):** an independent outer gate fed by **two
 signals**, consulted by the Pacer before every 40 ms chunk:
 
-1. *EnergyVAD on the live meeting audio* — **primary**. Continuous and truthful. Added after the
-   first live rehearsal falsified the original events-only design: in a single-participant Google
-   Meet, Recall delivered exactly one `speech_on` and zero `speech_off` in 4 minutes (Meet's
-   active-speaker signal never switches away from a lone speaker), which first held the gate on a
-   phantom speaker for 45 s (dropping the greeting as stale) and then, after the stuck-speaker
-   prune, left the gate wide open for the rest of the call. The same rehearsal's logs proved the
-   page's mic feed excludes the bot's own voice (input RMS was zero during every agent turn), so
-   VAD-gating cannot self-block. `VAD_GATE=false` reverts to events-only for the one setup that
-   could break this: a room whose speakers leak agent audio back into the meeting mic.
-2. *Recall's `speech_on`/`speech_off`* — secondary signal and the source of speaker attribution
-   (dashboard "who is speaking"; the bot's own name is filtered). Reliable only with multiple
-   participants.
+1. *EnergyVAD on the live meeting audio* — **primary, while live**. Continuous and truthful.
+   Added after the first live rehearsal falsified the original events-only design: in a
+   single-participant Google Meet, Recall delivered exactly one `speech_on` and zero `speech_off`
+   in 4 minutes, which first held the gate on a phantom speaker for 45 s (dropping the greeting
+   as stale) and then, after the stuck-speaker prune, left the gate wide open for the rest of the
+   call. A later run showed events also fire at bogus times (a speech_on pre-admission blocked
+   the reply to a provably silent room). The rehearsal logs proved the page's mic feed excludes
+   the bot's own voice (input RMS zero during every agent turn) — on the page path only, which is
+   why VAD authority is restricted to `audio_source=page` (the recall_ws fallback feeds a mixed
+   stream that may include our own output). **Staleness rule**: a VAD that hasn't seen frames for
+   1.5 s (stalled feed, capture failure, no audio yet) surrenders authority back to events — a
+   frozen "quiet" must not open the floor over talking humans, and a frozen "voice" must not mute
+   the bot forever. `VAD_GATE=false` reverts to events-only gating entirely.
+2. *Recall's `speech_on`/`speech_off`* — speaker attribution (dashboard "who is speaking"; the
+   bot's own name is filtered), the gating signal whenever the VAD is stale or disabled, and a
+   permanent member of the hard-stop union (below). Reliable only with multiple participants.
 
 Gate mechanics:
 
@@ -88,8 +92,13 @@ Gate mechanics:
   `test_interrupted_while_gate_held_flushes_before_release` — but we do not rely on it.
 - **max-hold** (20 s): a stuck `speech_on` (lost event, participant left mid-word) is pruned so
   the agent can't be muted forever; participant-leave also releases the floor.
-- **hard-stop watchdog** (400 ms): if a human has been talking over playing agent audio (either
-  signal) and no `interrupted` arrived (e.g. echo-masked barge-in), we force-drop ourselves.
+- **hard-stop watchdog** (400 ms): if a human has been talking over playing agent audio and no
+  `interrupted` arrived, we force-drop ourselves. Safety-critical, so it takes the UNION of both
+  signals (a live VAD catches speech events never report; fresh events catch speakers below the
+  VAD threshold), with stuck phantoms pruned first. Asymmetric risk pricing: a fresh false event
+  costs one dropped response — which the drop-recovery note restates — while a missed real
+  overlap means talking over a human. Force-drops are sticky (a re-fire can't clear the
+  discard flag and replay a killed generation's tail) and count as handled overlaps.
 - **drop coherence** (live finding): a dropped response exists in the model's history but was
   never heard — left alone, the model and the humans diverge ("it asked a question; they heard
   silence"; the greeting was the worst case, since people talk right when admitting a bot). So

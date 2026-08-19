@@ -102,10 +102,11 @@ DROPPED_RESPONSE_NUDGE = (
 
 
 def context_refresher(progress_note: str) -> str:
-    """Sent when sliding-window compression evicted older conversation history."""
+    """Routine periodic state maintenance (sent every reanchor_interval_s at a
+    quiet moment) — NOT a reaction to anything; the runtime sends it on a
+    timer so long sessions always hold the authoritative discovery state."""
     return (
-        "[system note] Reminder of the authoritative discovery state (your earlier context "
-        f"may have been trimmed): {progress_note} "
+        f"[system note] Routine reminder of the authoritative discovery state: {progress_note} "
         "You already greeted the participants — do NOT greet again or restart. Never re-ask, "
         "re-confirm, or re-verify anything already answered or skipped. Do not acknowledge or "
         "react to this note: if a participant is mid-conversation, simply keep listening; only "

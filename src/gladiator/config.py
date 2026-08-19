@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     # "page": capture meeting audio inside the Output Media page (~20ms frames).
     # "recall_ws": fallback via Recall's audio_mixed_raw websocket (200ms chunks).
     audio_source: str = "page"
-    inbound_frame_ms: int = 20
     outbound_chunk_ms: int = 40      # pacer cadence toward the page
     page_buffer_target_ms: int = 160  # page-side jitter buffer the pacer keeps primed
 

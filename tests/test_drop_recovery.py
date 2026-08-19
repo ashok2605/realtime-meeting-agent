@@ -30,12 +30,15 @@ def make_runtime(tmp_path) -> Runtime:
 
 
 def room_talking(rt: Runtime) -> None:
+    now = time.monotonic()
+    rt.bridge.vad.last_feed_mono = now  # feed flowing -> VAD holds authority
     rt.bridge.vad.in_voice = True
-    rt.bridge.vad.voice_since = time.monotonic()
-    rt.bridge.vad.last_voice_mono = time.monotonic()
+    rt.bridge.vad.voice_since = now
+    rt.bridge.vad.last_voice_mono = now
 
 
 def room_quiet(rt: Runtime, since_s: float = 1.0) -> None:
+    rt.bridge.vad.last_feed_mono = time.monotonic()
     rt.bridge.vad.in_voice = False
     rt.bridge.vad.voice_since = None
     rt.bridge.vad.last_voice_mono = time.monotonic() - since_s

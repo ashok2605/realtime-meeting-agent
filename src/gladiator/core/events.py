@@ -28,7 +28,6 @@ class EventBus:
         self.ring: deque[dict[str, Any]] = deque(maxlen=RING_SIZE)
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self._log_file = None
-        self._dropped = 0
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_file = log_path.open("a", encoding="utf-8")
@@ -55,7 +54,6 @@ class EventBus:
                     q.put_nowait(event)
                 except asyncio.QueueEmpty:
                     pass
-                self._dropped += 1
         return event
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:

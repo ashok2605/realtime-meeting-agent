@@ -44,6 +44,8 @@ class VoiceSignal(Protocol):
 
     def last_quiet_mono(self) -> float | None: ...
 
+    def is_stale(self, max_age_s: float) -> bool: ...
+
 
 @dataclass
 class Speaker:
@@ -100,10 +102,6 @@ class SpeechState:
     def any_human_speaking(self) -> bool:
         return bool(self.speaking)
 
-    def silence_duration(self) -> float:
-        """Seconds since the last human stopped speaking (inf-ish if long ago)."""
-        return self._clock() - self.last_speech_off_mono
-
     def _wake(self) -> None:
         self.changed.set()
 
@@ -125,25 +123,39 @@ class FloorGate:
         self._clock = clock
         self.last_hold_ms: float = 0.0
 
+    # A VAD that hasn't seen frames recently is untrustworthy (stalled feed,
+    # capture failure, or no audio yet): fall back to events-gating until it
+    # recovers. Frozen 'quiet' must not open the floor over talking humans;
+    # frozen 'voice' must not mute the bot forever.
+    VAD_STALE_AFTER_S = 1.5
+
+    def _live_vad(self) -> VoiceSignal | None:
+        if self._vad is not None and not self._vad.is_stale(self.VAD_STALE_AFTER_S):
+            return self._vad
+        return None
+
     def _vad_speaking(self) -> bool:
-        return self._vad is not None and self._vad.in_voice
+        vad = self._live_vad()
+        return vad is not None and vad.in_voice
 
     def _silence_duration(self) -> float:
-        if self._vad is not None:
+        vad = self._live_vad()
+        if vad is not None:
             # VAD-authoritative: the meeting audio is the truth about silence.
-            quiet = self._vad.last_quiet_mono()
+            quiet = vad.last_quiet_mono()
             return 0.0 if quiet is None else self._clock() - quiet
         return self._clock() - self._speech.last_speech_off_mono
 
     def is_open(self) -> bool:
-        """VAD-authoritative when available: Recall speech events observed live
-        are both sparse AND asymmetric in small meetings (a speech_on with no
-        speech_off, fired while the bot was still in the waiting room, once
-        blocked the floor for the full 20s prune window against a silent mic).
-        With a VAD they are attribution-only; without one (vad_gate=false)
-        they gate as before."""
-        if self._vad is not None:
-            return not self._vad.in_voice and self._silence_duration() >= self._grace_s
+        """VAD-authoritative while the VAD is live: Recall speech events
+        observed live are both sparse AND asymmetric in small meetings (a
+        speech_on with no speech_off, fired while the bot was still in the
+        waiting room, once blocked the floor for the full 20s prune window
+        against a silent mic). While a live VAD holds authority, events are
+        attribution-only; when the VAD is stale/absent, events gate."""
+        vad = self._live_vad()
+        if vad is not None:
+            return not vad.in_voice and self._silence_duration() >= self._grace_s
         return (not self._speech.any_human_speaking()
                 and self._silence_duration() >= self._grace_s)
 

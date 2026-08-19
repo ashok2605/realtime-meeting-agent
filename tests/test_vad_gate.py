@@ -16,10 +16,15 @@ LOUD = (3000).to_bytes(2, "little", signed=True) * 320
 QUIET = b"\x00\x00" * 320
 
 
-def make_gate(vad: EnergyVAD, grace_ms=30, stale_drop_ms=200):
-    speech = SpeechState(bot_name="Gladiator")
+def make_gate(vad: EnergyVAD, grace_ms=30, stale_drop_ms=200, clock=None):
+    # One clock everywhere: mixing a fake gate clock with SpeechState's real
+    # clock produces garbage silence durations (a reviewed pitfall).
+    import time as _time
+    clock = clock or _time.monotonic
+    speech = SpeechState(bot_name="Gladiator", clock=clock)
     gate = FloorGate(speech, EventBus(), grace_ms=grace_ms,
-                     stale_drop_ms=stale_drop_ms, max_hold_ms=10_000, vad=vad)
+                     stale_drop_ms=stale_drop_ms, max_hold_ms=10_000,
+                     vad=vad, clock=clock)
     return speech, gate
 
 
@@ -82,28 +87,72 @@ async def test_events_still_gate_when_vad_disabled():
     assert gate.is_open()
 
 
-async def test_hard_stop_due_fires_on_vad_only(tmp_path):
+async def test_hard_stop_unions_both_signals(tmp_path):
+    """The safety watchdog takes the UNION: VAD catches speech Recall never
+    reports; fresh Recall events catch speakers the VAD can't hear (soft voice
+    below threshold). Ancient stuck events are pruned before consultation."""
     settings = Settings(recall_api_key="x", gemini_api_key="x", runs_dir=tmp_path,
-                        gate_hard_stop_ms=50)
+                        gate_hard_stop_ms=50, gate_max_hold_ms=1_000)
     rt = Runtime(settings)
     now = time.monotonic()
     rt.pacer._last_send_mono = now                      # agent actively playing
-    rt.bridge.vad.in_voice = True                       # human talking over it...
-    rt.bridge.vad.voice_since = now - 0.2               # ...for 200ms
+
+    # VAD alone (live feed) fires
+    rt.bridge.vad.last_feed_mono = now
+    rt.bridge.vad.in_voice = True
+    rt.bridge.vad.voice_since = now - 0.2
     assert rt._hard_stop_due() is not None
 
     rt.bridge.last_interrupt_mono = now                 # Gemini already handled it
     assert rt._hard_stop_due() is None
 
+    # fresh Recall event alone fires too (soft speaker the VAD can't hear)
     rt.bridge.last_interrupt_mono = -1e9
-    rt.bridge.vad.in_voice = False                      # nobody talking
+    rt.bridge.vad.in_voice = False
     rt.bridge.vad.voice_since = None
-    assert rt._hard_stop_due() is None
+    rt.speech.on_speech_on("1", "Priya")
+    rt.speech.speaking["1"].since_mono = now - 0.2
+    assert rt._hard_stop_due() is not None
 
-    # a stuck phantom speech_on must NOT be able to hard-stop healthy speech
-    rt.speech.on_speech_on("1", "Madamanchi Ashok Chowdary")
+    # ...but an ancient stuck phantom is pruned, not acted on
+    rt.speech.speaking["1"].since_mono = now - 5        # > max_hold (1s)
+    assert rt._hard_stop_due() is None
+    assert not rt.speech.any_human_speaking(), "phantom must be pruned"
+
+    # stale VAD (stalled feed) contributes nothing
+    rt.bridge.vad.last_feed_mono = now - 10
+    rt.bridge.vad.in_voice = True
+    rt.bridge.vad.voice_since = now - 0.2
     assert rt._hard_stop_due() is None
     rt.bus.close()
+
+
+async def test_stale_vad_falls_back_to_events_gating():
+    """Review finding: a stalled feed froze the VAD and either opened the floor
+    over talking humans (frozen quiet) or muted the bot forever (frozen voice).
+    A stale VAD must surrender authority back to Recall events."""
+    t = {"now": 100.0}
+    vad = EnergyVAD(hangover_ms=50, clock=lambda: t["now"])
+    speech, gate = make_gate(vad, clock=lambda: t["now"])
+
+    # feed alive and quiet -> VAD authority, phantom events ignored
+    vad.feed(QUIET)
+    t["now"] = 101.0
+    speech.on_speech_on("1", "Priya")
+    assert gate.is_open()
+
+    # feed stalls (> VAD_STALE_AFTER_S with no frames) -> events gate again
+    t["now"] = 103.0
+    assert not gate.is_open(), "stale VAD must not keep the floor open"
+    speech.on_speech_off("1", "Priya")
+    t["now"] = 104.0
+    assert gate.is_open()
+
+    # frozen-in-voice stall must not mute the bot forever either
+    vad.feed(LOUD)          # mid-word...
+    assert not gate.is_open()
+    t["now"] = 106.0        # ...feed dies for 2s: VAD stale, events say quiet
+    assert gate.is_open()
 
 
 async def test_vad_gate_can_be_disabled(tmp_path):

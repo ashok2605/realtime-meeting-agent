@@ -80,3 +80,25 @@ async def test_muted_bridge_forwards_nothing():
     bridge.muted = True
     bridge.feed_frame(b"\x00\x01" * 160)
     assert bridge._inbound.qsize() == 0
+
+
+async def test_force_drop_discard_is_sticky_across_refires():
+    """Review finding: the hard-stop watchdog can re-fire within its 280ms
+    agent_playing window; the second force_drop used to CLEAR the discard flag,
+    letting the killed generation's still-streaming tail play as a new turn."""
+    bridge = AudioBridge(EventBus(), LatencyTracker(EventBus()), chunk_ms=40)
+    bridge.on_model_audio(b"\x00\x01" * 24000)   # generation streaming
+    bridge.force_drop("hard_stop")
+    assert bridge._discarding
+    t_first = bridge.last_interrupt_mono
+    assert t_first > 0, "a force drop counts as a handled overlap"
+
+    bridge.force_drop("hard_stop")               # watchdog re-fires
+    assert bridge._discarding, "discard must be sticky until the turn boundary"
+
+    bridge.on_model_audio(b"\x00\x01" * 24000)   # tail of the killed generation
+    assert bridge.buffer.buffered_ms == 0, "tail must be discarded, not replayed"
+
+    bridge.on_turn_complete()                     # boundary ends discard mode
+    bridge.on_model_audio(b"\x00\x01" * 4800)
+    assert bridge.buffer.buffered_ms > 0, "next generation plays normally"

@@ -111,7 +111,16 @@ class EnergyVAD:
         self.in_voice = False
         self.last_voice_mono: float | None = None
         self.voice_since: float | None = None  # start of the current utterance
+        self.last_feed_mono: float | None = None  # None until the first frame arrives
         self.last_rms = 0
+
+    def is_stale(self, max_age_s: float) -> bool:
+        """True when the VAD can't be trusted: it has never seen a frame, or the
+        audio feed stalled (page ws drop, capture failure). A frozen VAD must not
+        hold authority — frozen 'quiet' opens the floor over talking humans,
+        frozen 'voice' mutes the bot forever (review findings)."""
+        return (self.last_feed_mono is None
+                or self._clock() - self.last_feed_mono > max_age_s)
 
     def last_quiet_mono(self) -> float | None:
         """When the room last became quiet (voice end + hangover); None if speaking."""
@@ -130,6 +139,7 @@ class EnergyVAD:
 
     def feed(self, pcm: bytes) -> None:
         now = self._clock()
+        self.last_feed_mono = now
         self.last_rms = self._rms(pcm)
         if self.last_rms >= self._threshold:
             if not self.in_voice:
@@ -253,9 +263,13 @@ class AudioBridge:
 
     def force_drop(self, reason: str) -> None:
         """Stale drop / hard stop: discard this response, including its unsent tail."""
+        # Counts as "overlap handled" for the watchdog, and discard must be
+        # STICKY: a re-fired drop with _turn_open already False must not clear
+        # it, or the killed generation's tail plays back as a fresh turn.
+        self.last_interrupt_mono = time.monotonic()
         epoch_before = self.buffer.epoch
         dropped = self.buffer.flush()
-        self._discarding = self._turn_open  # eat the rest of the generation, if any
+        self._discarding = self._discarding or self._turn_open
         self._turn_open = False
         self._bus.emit("turn.force_drop", reason=reason, epoch=epoch_before,
                        dropped_ms=round(dropped, 1))
@@ -267,6 +281,11 @@ class AudioBridge:
     def _schedule_page_flush(self) -> None:
         if self.notify_page_flush is not None:
             asyncio.get_running_loop().create_task(self.notify_page_flush(self.buffer.epoch))
+
+    def clear_speech_anchor(self) -> None:
+        """A text nudge (not user speech) is about to cause the next model turn:
+        the latency tracker must not attribute it to stale speech."""
+        self._latency.clear_anchor()
 
 
 class Pacer:

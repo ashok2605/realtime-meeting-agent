@@ -77,10 +77,5 @@ class RecallClient:
         resp = await self._http.post(f"/bot/{bot_id}/leave_call/")
         self._bus.emit("recall.leave_requested", bot_id=bot_id, status=resp.status_code)
 
-    async def send_chat(self, bot_id: str, message: str) -> None:
-        resp = await self._http.post(f"/bot/{bot_id}/send_chat_message/",
-                                     json={"message": message})
-        self._bus.emit("recall.chat_sent", bot_id=bot_id, status=resp.status_code)
-
     async def close(self) -> None:
         await self._http.aclose()

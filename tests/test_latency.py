@@ -93,3 +93,27 @@ async def test_pacer_discards_stale_epoch_chunks():
         assert old not in sent[first_new:], "stale chunks leaked after flush"
     finally:
         task.cancel()
+
+
+def test_anchor_consumed_once_and_clearable():
+    """Explicit causality (review finding): one utterance anchors at most one
+    turn, and a text nudge clears the anchor so nudge-caused turns never
+    inherit stale speech timing — no age heuristic censoring slow real turns."""
+    t = {"now": 100.0}
+    bus = EventBus()
+    tracker = LatencyTracker(bus, clock=lambda: t["now"])
+
+    tracker.mark_speech_end(100.0)
+    t["now"] = 130.0                    # a genuinely slow (30s) speech-caused turn
+    tracker.mark_first_audio(epoch=1)
+    assert tracker._turns[1].speech_end_mono == 100.0, "slow turns keep their anchor"
+
+    t["now"] = 131.0                    # second turn, no new speech
+    tracker.mark_first_audio(epoch=2)
+    assert tracker._turns[2].speech_end_mono is None, "anchor is consume-once"
+
+    tracker.mark_speech_end(131.5)
+    tracker.clear_anchor()              # a nudge went out before the model spoke
+    t["now"] = 133.0
+    tracker.mark_first_audio(epoch=3)
+    assert tracker._turns[3].speech_end_mono is None, "nudge turns carry no anchor"

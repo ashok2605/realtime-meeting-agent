@@ -43,10 +43,6 @@ class GeminiSession:
         self._greeted = False
         self._greeting_pending = False
         self.reconnects = 0
-        # Usage-dip observability (informational only — see
-        # _check_context_compression for why this must never trigger nudges).
-        self._max_total_tokens: int | None = None
-        self._drop_streak = 0
 
     @property
     def greeted(self) -> bool:
@@ -95,8 +91,6 @@ class GeminiSession:
                         config=self._build_config()) as session:
                     self._session = session
                     backoff = 0.5
-                    self._max_total_tokens = None  # fresh counter per connection
-                    self._drop_streak = 0
                     self._bus.emit("gemini.connected",
                                    model=self._settings.gemini_model,
                                    reconnects=self.reconnects,
@@ -191,33 +185,12 @@ class GeminiSession:
 
         if msg.usage_metadata is not None:
             um = msg.usage_metadata
+            # Raw per-turn accounting only. NOTE: total_token_count is NOT a
+            # context-size proxy — it swings with turn size and interrupted
+            # turns report partial usage (proven live) — so no online logic may
+            # ever be attached to drops in this number. Analyze offline if
+            # curious; events.jsonl has every reading.
             self._bus.emit("gemini.usage", total_tokens=um.total_token_count)
-            self._check_context_compression(um.total_token_count)
-
-    def _check_context_compression(self, total_tokens: int | None) -> None:
-        """Informational only. Live data killed the detection idea in two steps:
-        first, interrupted turns report partial-turn usage (single-dip false
-        positives); then a third meeting showed total_token_count swings with
-        turn size generally (4.2k -> 8.9k -> 4.9k within a minute) — it is
-        per-turn accounting, not a context-size proxy, so usage drops CANNOT
-        reliably indicate eviction. We log persistent dips for observability
-        and rely on deterministic defenses instead: an oversized window
-        (eviction can't occur in a meeting-length session) plus the runtime's
-        periodic re-anchor. A false nudge is worse than none — text nudges
-        make the model speak."""
-        if total_tokens is None:
-            return
-        if self._max_total_tokens is None or total_tokens >= self._max_total_tokens - 1_500:
-            self._max_total_tokens = max(self._max_total_tokens or 0, total_tokens)
-            self._drop_streak = 0
-            return
-        self._drop_streak += 1
-        if self._drop_streak < 2:
-            return
-        self._bus.emit("gemini.usage_dip",
-                       running_max=self._max_total_tokens, current=total_tokens)
-        self._max_total_tokens = total_tokens
-        self._drop_streak = 0
 
     async def _finish_deferred(self, fc: types.FunctionCall,
                                session: genai.live.AsyncSession) -> None:
@@ -265,16 +238,24 @@ class GeminiSession:
         except ConnectionClosed:
             pass
 
-    async def send_text(self, text: str) -> None:
+    async def send_text(self, text: str) -> bool:
+        """Returns True only if the note actually reached the model — callers
+        log their events on success, so the event log never claims a nudge
+        that a mid-reconnect gap silently swallowed."""
         session = self._session
         if session is None:
-            return
+            self._bus.emit("gemini.send_dropped", kind="text", reason="no_session")
+            return False
         try:
             async with self._send_lock:
                 await session.send_realtime_input(text=text)
-            self._bus.emit("gemini.nudge", text=text[:120])
         except ConnectionClosed:
-            self._bus.emit("gemini.send_dropped", kind="text")
+            self._bus.emit("gemini.send_dropped", kind="text", reason="closed")
+            return False
+        # A text nudge, not user speech, causes the next turn: fix attribution.
+        self._bridge.clear_speech_anchor()
+        self._bus.emit("gemini.nudge", text=text[:120])
+        return True
 
     # ---- greeting ----------------------------------------------------------
     async def request_greeting(self) -> None:

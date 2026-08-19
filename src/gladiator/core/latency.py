@@ -83,19 +83,22 @@ class LatencyTracker:
     def mark_speech_end(self, mono: float | None = None) -> None:
         self._last_speech_end = mono if mono is not None else self._clock()
 
-    # A turn triggered by a text nudge (greeting, silence re-engagement) has no
-    # causal user speech; anchoring it to minutes-old speech pollutes the stats
-    # with absurd e2e values (observed: 60s). Only trust a recent anchor.
-    MAX_ANCHOR_AGE_S = 15.0
+    def clear_anchor(self) -> None:
+        """Called whenever a text nudge is sent: the next turn is nudge-caused,
+        not speech-caused. Explicit causality — the runtime KNOWS which turns
+        it triggered — replaced an age heuristic that both censored genuinely
+        slow speech-caused turns (web-search answers >15s vanished from p95)
+        and still misattributed nudge turns fired shortly after speech."""
+        self._last_speech_end = None
 
     def mark_first_audio(self, epoch: int) -> None:
         turn = self._turns.setdefault(epoch, Turn(epoch=epoch))
         if turn.first_audio_mono is None:
             turn.first_audio_mono = self._clock()
-            anchor = self._last_speech_end
-            if anchor is not None and self._clock() - anchor > self.MAX_ANCHOR_AGE_S:
-                anchor = None  # not caused by user speech (nudge-triggered turn)
-            turn.speech_end_mono = anchor
+            # Consume-on-use: one utterance anchors at most one turn, so a
+            # second model turn without new speech can't inherit the anchor.
+            turn.speech_end_mono = self._last_speech_end
+            self._last_speech_end = None
 
     def mark_first_send(self, epoch: int, gate_hold_ms: float = 0.0) -> None:
         turn = self._turns.setdefault(epoch, Turn(epoch=epoch))
