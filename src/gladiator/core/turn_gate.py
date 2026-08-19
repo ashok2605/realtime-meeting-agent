@@ -129,18 +129,22 @@ class FloorGate:
         return self._vad is not None and self._vad.in_voice
 
     def _silence_duration(self) -> float:
-        """Seconds since BOTH signals last reported a quiet room."""
-        last = self._speech.last_speech_off_mono
         if self._vad is not None:
+            # VAD-authoritative: the meeting audio is the truth about silence.
             quiet = self._vad.last_quiet_mono()
-            if quiet is None:
-                return 0.0  # voice active right now
-            last = max(last, quiet)
-        return self._clock() - last
+            return 0.0 if quiet is None else self._clock() - quiet
+        return self._clock() - self._speech.last_speech_off_mono
 
     def is_open(self) -> bool:
+        """VAD-authoritative when available: Recall speech events observed live
+        are both sparse AND asymmetric in small meetings (a speech_on with no
+        speech_off, fired while the bot was still in the waiting room, once
+        blocked the floor for the full 20s prune window against a silent mic).
+        With a VAD they are attribution-only; without one (vad_gate=false)
+        they gate as before."""
+        if self._vad is not None:
+            return not self._vad.in_voice and self._silence_duration() >= self._grace_s
         return (not self._speech.any_human_speaking()
-                and not self._vad_speaking()
                 and self._silence_duration() >= self._grace_s)
 
     async def wait_for_floor(self) -> str:

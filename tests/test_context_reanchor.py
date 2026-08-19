@@ -1,15 +1,18 @@
-"""Regression: sliding-window compression amnesia detection (two live findings).
+"""Context maintenance regressions, shaped by three live findings:
 
-Finding 1 (runs/20260819-233914): compression evicting history shows up as
-usage totals dropping and STAYING low; the model must be re-anchored with the
-server-side discovery state.
-Finding 2 (runs/20260820-001538): interrupted turns report partial-turn usage
-— a single low reading that bounces back. Firing a re-anchor on those is
-actively harmful (a text nudge makes the model speak, which caused unprompted
-re-confirmation of answered questions). Detection requires two consecutive
-depressed readings."""
+1. Sliding-window eviction at small window sizes causes real mid-call amnesia
+   (fixed by an oversized window — eviction can't occur in a meeting-length
+   session).
+2. usage_metadata.total_token_count is per-turn accounting, NOT a context-size
+   proxy: interrupted turns report partial usage, and totals swing with turn
+   size generally (4.2k -> 8.9k -> 4.9k in one live minute). So usage drops
+   must NEVER trigger nudges (a false nudge makes the model speak unprompted);
+   persistent dips are logged as informational `gemini.usage_dip` only.
+3. The reliable mechanism is deterministic: a periodic re-anchor note with the
+   authoritative server-side discovery state, delivered at a quiet moment."""
 
 import asyncio
+import time
 
 from google.genai import types
 
@@ -20,6 +23,7 @@ from gladiator.core.events import EventBus
 from gladiator.core.latency import LatencyTracker
 from gladiator.gemini.session import GeminiSession
 from gladiator.gemini.tools import ToolDispatcher
+from gladiator.runtime import Runtime
 
 
 class StubSession:
@@ -38,9 +42,7 @@ def make_session():
     session = GeminiSession(settings, bus, bridge,
                             ToolDispatcher(tracker, bus, request_leave=lambda r: None),
                             tracker)
-    session._session = StubSession()  # so send_text has a live target
-    tracker.record_answer("current-systems", "Siebel CRM.")
-    tracker.mark_skipped("sales-process", "declined")
+    session._session = StubSession()
     return session, bus
 
 
@@ -54,44 +56,74 @@ async def feed(session, totals):
         await session.handle_message(usage_msg(total), session._session)
 
 
-async def test_persistent_drop_triggers_reanchor_with_state():
+async def test_usage_drops_never_nudge_only_log():
     session, bus = make_session()
-    # normal growth, then eviction: totals drop and stay low (finding 1 pattern)
-    await feed(session, [2_000, 8_000, 12_000, 6_700, 7_200])
-    await asyncio.sleep(0)  # let the nudge task run
-    types_seen = [e["type"] for e in bus.ring]
-    assert "gemini.context_compressed" in types_seen
-    assert "gemini.context_reanchored" in types_seen
-    nudges = [e for e in bus.ring if e["type"] == "gemini.nudge"]
-    assert nudges, "re-anchor nudge must be sent to the model"
-    assert "Still open" in session._tracker.progress_note()
-
-
-async def test_single_dip_from_interrupted_turn_is_ignored():
-    session, bus = make_session()
-    # finding 2 pattern: dip on an interrupted turn, right back above trend
-    await feed(session, [12_000, 18_794, 10_050, 21_567, 11_428, 23_229, 24_257])
+    # verbatim pattern from runs/20260820-010704 that fooled the old detector
+    await feed(session, [4_990, 2_795, 3_037, 3_569, 8_874, 4_878, 5_305])
     await asyncio.sleep(0)
-    assert not any(e["type"] == "gemini.context_compressed" for e in bus.ring), \
-        "oscillating totals are interrupted-turn artifacts, not eviction"
-    assert not any(e["type"] == "gemini.nudge" for e in bus.ring)
+    assert any(e["type"] == "gemini.usage_dip" for e in bus.ring), \
+        "persistent dips are still logged for observability"
+    assert not any(e["type"] == "gemini.nudge" for e in bus.ring), \
+        "usage accounting noise must never make the model speak"
 
 
-async def test_reanchor_rate_limited():
+async def test_single_dip_not_even_logged():
     session, bus = make_session()
-    await feed(session, [12_000, 6_000, 6_500])          # eviction #1 -> anchor
-    await feed(session, [11_000, 5_000, 5_500])          # eviction #2 within 60s
-    await asyncio.sleep(0)
-    compressed = [e for e in bus.ring if e["type"] == "gemini.context_compressed"]
-    anchored = [e for e in bus.ring if e["type"] == "gemini.context_reanchored"]
-    assert len(compressed) == 2, "every confirmed eviction is logged"
-    assert len(anchored) == 1, "but re-anchoring is rate-limited"
+    # interrupted-turn artifact: one dip, right back above trend
+    await feed(session, [12_000, 18_794, 10_050, 21_567])
+    assert not any(e["type"] == "gemini.usage_dip" for e in bus.ring)
 
 
-async def test_reconnect_reset_prevents_false_positive():
-    session, bus = make_session()
-    await feed(session, [10_000, 9_200])       # small dip: turn-size variance
-    session._max_total_tokens = None           # what run() does on reconnect
-    session._drop_streak = 0
-    await feed(session, [500, 900])            # fresh session's tiny totals
-    assert not any(e["type"] == "gemini.context_compressed" for e in bus.ring)
+async def test_periodic_reanchor_sends_state_at_quiet_moment(tmp_path):
+    settings = Settings(recall_api_key="x", gemini_api_key="x", runs_dir=tmp_path,
+                        reanchor_interval_s=1)
+    rt = Runtime(settings)
+    rt.session._session = StubSession()
+    rt._admitted = True
+    rt.session._greeted = True
+    rt.tracker.record_answer("current-systems", "Siebel CRM.")
+    rt.bridge.vad.in_voice = False
+    rt.bridge.vad.last_voice_mono = time.monotonic() - 5  # quiet room
+    task = asyncio.create_task(rt._periodic_reanchor())
+    try:
+        await asyncio.sleep(1.6)
+        assert any(e["type"] == "runtime.periodic_reanchor" for e in rt.bus.ring)
+        nudges = [e for e in rt.bus.ring if e["type"] == "gemini.nudge"]
+        assert any("authoritative discovery state" in e["data"]["text"] for e in nudges)
+    finally:
+        task.cancel()
+        rt.bus.close()
+
+
+async def test_periodic_reanchor_waits_out_a_talking_room(tmp_path):
+    settings = Settings(recall_api_key="x", gemini_api_key="x", runs_dir=tmp_path,
+                        reanchor_interval_s=1)
+    rt = Runtime(settings)
+    rt.session._session = StubSession()
+    rt._admitted = True
+    rt.session._greeted = True
+    rt.bridge.vad.in_voice = True  # someone is talking, and keeps talking
+    rt.bridge.vad.last_voice_mono = time.monotonic()
+    task = asyncio.create_task(rt._periodic_reanchor())
+    try:
+        await asyncio.sleep(1.6)
+        assert not any(e["type"] == "runtime.periodic_reanchor" for e in rt.bus.ring), \
+            "the note must wait for a quiet moment"
+    finally:
+        task.cancel()
+        rt.bus.close()
+
+
+async def test_not_before_greeting(tmp_path):
+    settings = Settings(recall_api_key="x", gemini_api_key="x", runs_dir=tmp_path,
+                        reanchor_interval_s=1)
+    rt = Runtime(settings)
+    rt.session._session = StubSession()
+    rt._admitted = True  # admitted but never greeted (e.g. page audio not up)
+    task = asyncio.create_task(rt._periodic_reanchor())
+    try:
+        await asyncio.sleep(1.4)
+        assert not any(e["type"] == "runtime.periodic_reanchor" for e in rt.bus.ring)
+    finally:
+        task.cancel()
+        rt.bus.close()

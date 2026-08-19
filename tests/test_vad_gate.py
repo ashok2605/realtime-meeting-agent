@@ -49,20 +49,37 @@ async def test_vad_release_after_hangover_plus_grace():
     assert await gate.wait_for_floor() == OPEN
 
 
-async def test_either_signal_alone_blocks_the_floor():
-    t = {"now": 0.0}
+async def test_vad_is_authoritative_over_phantom_speech_events():
+    """Live regression (runs/20260820-010704): a stray speech_on with no
+    speech_off — fired while the bot was still in the waiting room — blocked
+    the floor against a provably silent mic for the full 20s prune window,
+    stale-dropping the reply to the user's 'Hello'. With a VAD present,
+    Recall events are attribution-only and must never block."""
+    t = {"now": 100.0}
     vad = EnergyVAD(hangover_ms=50, clock=lambda: t["now"])
     speech, gate = make_gate(vad)
-    # Recall event only (multi-participant case, quiet mic)
+    gate._clock = lambda: t["now"]
+    vad.feed(LOUD)
+    t["now"] = 101.0
+    vad.feed(QUIET)  # room genuinely quiet for ~1s
+    speech.on_speech_on("1", "Madamanchi Ashok Chowdary")  # phantom, no speech_off
+    assert gate.is_open(), "phantom event must not block a quiet room"
+    assert await gate.wait_for_floor() == OPEN
+
+    # real voice still blocks, of course
+    vad.feed(LOUD)
+    assert not gate.is_open()
+
+
+async def test_events_still_gate_when_vad_disabled():
+    speech = SpeechState(bot_name="Gladiator")
+    gate = FloorGate(speech, EventBus(), grace_ms=0,
+                     stale_drop_ms=100_000, max_hold_ms=10_000, vad=None)
     speech.on_speech_on("1", "Priya")
     assert not gate.is_open()
     speech.on_speech_off("1", "Priya")
-    t["now"] = 1.0
-    await asyncio.sleep(0.05)  # real-clock grace for the events side
+    await asyncio.sleep(0.01)
     assert gate.is_open()
-    # VAD only (single-participant case, no events)
-    vad.feed(LOUD)
-    assert not gate.is_open()
 
 
 async def test_hard_stop_due_fires_on_vad_only(tmp_path):
@@ -81,6 +98,10 @@ async def test_hard_stop_due_fires_on_vad_only(tmp_path):
     rt.bridge.last_interrupt_mono = -1e9
     rt.bridge.vad.in_voice = False                      # nobody talking
     rt.bridge.vad.voice_since = None
+    assert rt._hard_stop_due() is None
+
+    # a stuck phantom speech_on must NOT be able to hard-stop healthy speech
+    rt.speech.on_speech_on("1", "Madamanchi Ashok Chowdary")
     assert rt._hard_stop_due() is None
     rt.bus.close()
 

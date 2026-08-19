@@ -83,11 +83,19 @@ class LatencyTracker:
     def mark_speech_end(self, mono: float | None = None) -> None:
         self._last_speech_end = mono if mono is not None else self._clock()
 
+    # A turn triggered by a text nudge (greeting, silence re-engagement) has no
+    # causal user speech; anchoring it to minutes-old speech pollutes the stats
+    # with absurd e2e values (observed: 60s). Only trust a recent anchor.
+    MAX_ANCHOR_AGE_S = 15.0
+
     def mark_first_audio(self, epoch: int) -> None:
         turn = self._turns.setdefault(epoch, Turn(epoch=epoch))
         if turn.first_audio_mono is None:
             turn.first_audio_mono = self._clock()
-            turn.speech_end_mono = self._last_speech_end
+            anchor = self._last_speech_end
+            if anchor is not None and self._clock() - anchor > self.MAX_ANCHOR_AGE_S:
+                anchor = None  # not caused by user speech (nudge-triggered turn)
+            turn.speech_end_mono = anchor
 
     def mark_first_send(self, epoch: int, gate_hold_ms: float = 0.0) -> None:
         turn = self._turns.setdefault(epoch, Turn(epoch=epoch))

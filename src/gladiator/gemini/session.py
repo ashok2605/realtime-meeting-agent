@@ -14,7 +14,6 @@ with a compact discovery-state note.
 from __future__ import annotations
 
 import asyncio
-import time
 
 from google import genai
 from google.genai import types
@@ -24,7 +23,7 @@ from ..audio.bridge import AudioBridge
 from ..config import Settings
 from ..core.discovery import DiscoveryTracker
 from ..core.events import EventBus
-from .prompts import GREETING_NUDGE, context_refresher, reconnect_nudge, system_instruction
+from .prompts import GREETING_NUDGE, reconnect_nudge, system_instruction
 from .tools import ToolDispatcher, build_declarations
 
 
@@ -44,13 +43,10 @@ class GeminiSession:
         self._greeted = False
         self._greeting_pending = False
         self.reconnects = 0
-        # Compression-amnesia detection: usage totals normally grow within a
-        # session; a PERSISTENT drop means the sliding window evicted history.
-        # (A single low reading is usually an interrupted turn reporting
-        # partial-turn usage — observed live; totals bounce back next turn.)
+        # Usage-dip observability (informational only — see
+        # _check_context_compression for why this must never trigger nudges).
         self._max_total_tokens: int | None = None
         self._drop_streak = 0
-        self._last_reanchor_mono = 0.0
 
     @property
     def greeted(self) -> bool:
@@ -199,16 +195,16 @@ class GeminiSession:
             self._check_context_compression(um.total_token_count)
 
     def _check_context_compression(self, total_tokens: int | None) -> None:
-        """Sliding-window compression silently evicts conversation history —
-        observed in testing as mid-call amnesia (re-greeting, re-asking skipped
-        questions). Its fingerprint is a PERSISTENT drop in per-turn usage
-        totals: two consecutive readings well below the session's running max.
-        A single low reading is ignored — interrupted turns report partial-turn
-        usage and bounce back next turn (observed live; a false re-anchor is
-        itself disruptive, since a text nudge makes the model speak).
-
-        On confirmed eviction: re-anchor the model with the server-side
-        discovery state, which compression can never touch. Rate-limited."""
+        """Informational only. Live data killed the detection idea in two steps:
+        first, interrupted turns report partial-turn usage (single-dip false
+        positives); then a third meeting showed total_token_count swings with
+        turn size generally (4.2k -> 8.9k -> 4.9k within a minute) — it is
+        per-turn accounting, not a context-size proxy, so usage drops CANNOT
+        reliably indicate eviction. We log persistent dips for observability
+        and rely on deterministic defenses instead: an oversized window
+        (eviction can't occur in a meeting-length session) plus the runtime's
+        periodic re-anchor. A false nudge is worse than none — text nudges
+        make the model speak."""
         if total_tokens is None:
             return
         if self._max_total_tokens is None or total_tokens >= self._max_total_tokens - 1_500:
@@ -217,18 +213,11 @@ class GeminiSession:
             return
         self._drop_streak += 1
         if self._drop_streak < 2:
-            return  # could be an interrupted-turn artifact; wait for confirmation
-        self._bus.emit("gemini.context_compressed",
-                       before=self._max_total_tokens, after=total_tokens)
-        self._max_total_tokens = total_tokens  # new baseline post-eviction
-        self._drop_streak = 0
-        now = time.monotonic()
-        if now - self._last_reanchor_mono < 60:
             return
-        self._last_reanchor_mono = now
-        asyncio.get_running_loop().create_task(
-            self.send_text(context_refresher(self._tracker.progress_note())))
-        self._bus.emit("gemini.context_reanchored")
+        self._bus.emit("gemini.usage_dip",
+                       running_max=self._max_total_tokens, current=total_tokens)
+        self._max_total_tokens = total_tokens
+        self._drop_streak = 0
 
     async def _finish_deferred(self, fc: types.FunctionCall,
                                session: genai.live.AsyncSession) -> None:

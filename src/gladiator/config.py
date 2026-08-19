@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # net instead of an active participant.
     compression_trigger_tokens: int = 100_000
     compression_target_tokens: int = 64_000
+    # Deterministic state re-anchoring: every N seconds (at a quiet moment) the
+    # model gets a compact authoritative discovery-state note. Usage-based
+    # eviction *detection* proved unreliable (per-turn accounting noise), so we
+    # don't detect — we routinely re-anchor. 0 disables.
+    reanchor_interval_s: int = 480
 
     # --- tools ---
     # "native": google_search inside the Live session (verified working on this key).

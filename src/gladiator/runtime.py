@@ -25,7 +25,7 @@ from .core.discovery import DiscoveryTracker
 from .core.events import EventBus
 from .core.latency import LatencyTracker
 from .core.turn_gate import FloorGate, SpeechState
-from .gemini.prompts import DROPPED_RESPONSE_NUDGE, SILENCE_NUDGE
+from .gemini.prompts import DROPPED_RESPONSE_NUDGE, SILENCE_NUDGE, context_refresher
 from .gemini.session import GeminiSession
 from .gemini.tools import ToolDispatcher
 from .recall.client import RecallClient
@@ -105,6 +105,7 @@ class Runtime:
             asyncio.create_task(self.bridge.stats_reporter(), name="stats"),
             asyncio.create_task(self._hard_stop_watchdog(), name="hardstop"),
             asyncio.create_task(self._silence_nudger(), name="nudger"),
+            asyncio.create_task(self._periodic_reanchor(), name="reanchor"),
         ]
         self.bus.emit("runtime.started", audio_source=self.settings.audio_source,
                       model=self.settings.gemini_model, run_dir=str(self.run_dir))
@@ -336,14 +337,18 @@ class Runtime:
     def _hard_stop_due(self) -> float | None:
         """Overlap in ms if a human has been talking over playing agent audio
         for >= gate_hard_stop_ms with no interruption handled yet, else None.
-        Considers both signals: Recall speech events and the meeting-audio VAD."""
+        VAD-authoritative when vad_gate is on (Recall speech events are
+        unreliable in small meetings — a stuck speech_on must not be able to
+        force-drop healthy agent speech); events-only otherwise."""
         if not self.pacer.agent_playing:
             return None
         hard_stop_s = self.settings.gate_hard_stop_ms / 1000
-        since_candidates = [s.since_mono for s in self.speech.speaking.values()]
         vad = self.bridge.vad
-        if self.settings.vad_gate and vad.in_voice and vad.voice_since is not None:
-            since_candidates.append(vad.voice_since)
+        if self.settings.vad_gate:
+            since_candidates = ([vad.voice_since]
+                                if vad.in_voice and vad.voice_since is not None else [])
+        else:
+            since_candidates = [s.since_mono for s in self.speech.speaking.values()]
         if not since_candidates:
             return None
         earliest = min(since_candidates)
@@ -381,6 +386,30 @@ class Runtime:
                 self._last_nudge_mono = time.monotonic()
                 self.bus.emit("runtime.silence_nudge")
                 await self.session.send_text(SILENCE_NUDGE)
+
+    async def _periodic_reanchor(self) -> None:
+        """Deterministic context maintenance: at a regular cadence, re-tell the
+        model the authoritative discovery state (answered/skipped/open, already
+        greeted). Delivered at a quiet moment so it doesn't collide with anyone
+        speaking; the note itself instructs the model not to acknowledge it."""
+        interval = self.settings.reanchor_interval_s
+        if interval <= 0:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            if not (self._admitted and self.session.greeted):
+                continue
+            if self.tracker.phase == "done":
+                continue
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 30:
+                if self.gate.is_open() and not self.pacer.agent_playing:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                continue  # never found a quiet moment; try next cycle
+            self.bus.emit("runtime.periodic_reanchor")
+            await self.session.send_text(context_refresher(self.tracker.progress_note()))
 
     def _on_speech_end(self, last_voice_mono: float) -> None:
         self.latency.mark_speech_end(last_voice_mono)

@@ -122,12 +122,18 @@ Both mitigations are on:
   observed in testing as mid-call amnesia: the model re-greeted, re-asked skipped questions, and
   once answered its own question in the customer's voice. At 100k/64k compression is a >60-min
   safety net instead of an active participant.
-- **Compression amnesia detection + re-anchoring**: eviction is silent, but its fingerprint is a
-  sharp drop in `usage_metadata.total_token_count` between turns. On a drop >1.5k the session
-  emits `gemini.context_compressed` and (rate-limited to 1/min) injects a context-refresher note
-  built from `DiscoveryTracker.progress_note()` — the server-side state is authoritative and
-  survives anything, so the model is re-told what's answered/skipped/open and that it must not
-  re-greet. The same guardrail is in the system instruction ("greet at most once; when unsure,
+- **Re-anchoring is deterministic, not detection-based** — and the path to that design is a
+  useful story. First attempt: detect eviction via drops in `usage_metadata.total_token_count`.
+  Live data falsified it twice: interrupted turns report partial-turn usage (single-dip false
+  positives), and a third meeting showed totals swing with turn size generally (4.2k → 8.9k →
+  4.9k within one minute) — it's per-turn accounting, not a context-size proxy. False positives
+  are costly: a text nudge is a user-turn, so the model *responds* to it (observed: unprompted
+  re-confirmation of answered questions). Final design: no detection. The oversized window means
+  eviction can't occur in a meeting-length session, and the runtime sends a periodic
+  context-refresher (default every 8 min, only at a quiet moment) built from
+  `DiscoveryTracker.progress_note()` — the server-side state is authoritative and survives
+  anything. Persistent usage dips are still logged (`gemini.usage_dip`) for observability only.
+  The matching guardrail lives in the system instruction ("greet at most once; when unsure,
   assume you already did").
 - `session_resumption`: the rolling handle is kept; on `GoAway` (60 s warning) or socket close the
   run-loop reconnects with it. If a handle goes stale after repeated failures it's dropped and a
