@@ -45,8 +45,11 @@ class GeminiSession:
         self._greeting_pending = False
         self.reconnects = 0
         # Compression-amnesia detection: usage totals normally grow within a
-        # session; a large drop means the sliding window evicted history.
-        self._last_total_tokens: int | None = None
+        # session; a PERSISTENT drop means the sliding window evicted history.
+        # (A single low reading is usually an interrupted turn reporting
+        # partial-turn usage — observed live; totals bounce back next turn.)
+        self._max_total_tokens: int | None = None
+        self._drop_streak = 0
         self._last_reanchor_mono = 0.0
 
     @property
@@ -96,7 +99,8 @@ class GeminiSession:
                         config=self._build_config()) as session:
                     self._session = session
                     backoff = 0.5
-                    self._last_total_tokens = None  # fresh counter per connection
+                    self._max_total_tokens = None  # fresh counter per connection
+                    self._drop_streak = 0
                     self._bus.emit("gemini.connected",
                                    model=self._settings.gemini_model,
                                    reconnects=self.reconnects,
@@ -197,16 +201,27 @@ class GeminiSession:
     def _check_context_compression(self, total_tokens: int | None) -> None:
         """Sliding-window compression silently evicts conversation history —
         observed in testing as mid-call amnesia (re-greeting, re-asking skipped
-        questions). A big drop in the per-turn token total is its fingerprint;
-        respond by re-anchoring the model with the server-side discovery state,
-        which compression can never touch. Rate-limited to once a minute."""
+        questions). Its fingerprint is a PERSISTENT drop in per-turn usage
+        totals: two consecutive readings well below the session's running max.
+        A single low reading is ignored — interrupted turns report partial-turn
+        usage and bounce back next turn (observed live; a false re-anchor is
+        itself disruptive, since a text nudge makes the model speak).
+
+        On confirmed eviction: re-anchor the model with the server-side
+        discovery state, which compression can never touch. Rate-limited."""
         if total_tokens is None:
             return
-        prev = self._last_total_tokens
-        self._last_total_tokens = total_tokens
-        if prev is None or prev - total_tokens < 1_500:
+        if self._max_total_tokens is None or total_tokens >= self._max_total_tokens - 1_500:
+            self._max_total_tokens = max(self._max_total_tokens or 0, total_tokens)
+            self._drop_streak = 0
             return
-        self._bus.emit("gemini.context_compressed", before=prev, after=total_tokens)
+        self._drop_streak += 1
+        if self._drop_streak < 2:
+            return  # could be an interrupted-turn artifact; wait for confirmation
+        self._bus.emit("gemini.context_compressed",
+                       before=self._max_total_tokens, after=total_tokens)
+        self._max_total_tokens = total_tokens  # new baseline post-eviction
+        self._drop_streak = 0
         now = time.monotonic()
         if now - self._last_reanchor_mono < 60:
             return

@@ -98,6 +98,9 @@ def context_refresher(progress_note: str) -> str:
     return (
         "[system note] Reminder of the authoritative discovery state (your earlier context "
         f"may have been trimmed): {progress_note} "
-        "You already greeted the participants — do NOT greet again or restart. Never re-ask "
-        "answered or skipped questions. Continue naturally with what is still open."
+        "You already greeted the participants — do NOT greet again or restart. Never re-ask, "
+        "re-confirm, or re-verify anything already answered or skipped. Do not acknowledge or "
+        "react to this note: if a participant is mid-conversation, simply keep listening; only "
+        "when there is a natural opening, continue with a still-open question, or move to "
+        "wrap-up if none remain."
     )
