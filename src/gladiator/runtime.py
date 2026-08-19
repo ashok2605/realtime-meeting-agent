@@ -63,7 +63,8 @@ class Runtime:
         self.recall = RecallClient(settings, self.bus)
         self.router = RecallEventRouter(
             self.speech, self.bus, self.bridge,
-            on_human_speech_off=self._on_all_humans_quiet if settings.hybrid_vad else None)
+            on_human_speech_off=self._on_all_humans_quiet if settings.hybrid_vad else None,
+            on_roster_change=self._on_roster_change)
         self.pacer = Pacer(self.bridge, self.gate, self.bus, self.latency,
                            chunk_ms=settings.outbound_chunk_ms,
                            prime_ms=settings.page_buffer_target_ms,
@@ -349,6 +350,21 @@ class Runtime:
     def _on_all_humans_quiet(self) -> None:
         """Hybrid-VAD hook (ships OFF): skip Gemini's server-side silence wait."""
         asyncio.get_running_loop().create_task(self.session.send_audio_stream_end())
+
+    def _on_roster_change(self, kind: str, name: str) -> None:
+        """Give the model explicit multi-party awareness: who joined or left.
+        Suppressed before the greeting (the bot itself joining, the host already
+        present) so the opening isn't derailed."""
+        if name.strip().lower() == self.settings.bot_name.strip().lower():
+            return
+        if not self._admitted or not self.session.greeted:
+            return
+        note = (f"[system note] {name} just joined the meeting. Acknowledge them briefly "
+                "when natural and continue the discovery — do not start over."
+                if kind == "join" else
+                f"[system note] {name} left the meeting. Continue with whoever remains; "
+                "do not comment unless someone brings it up.")
+        asyncio.get_running_loop().create_task(self.session.send_text(note))
 
     # ------------------------------------------------------------- fallback
     async def _grounded_search(self, query: str) -> dict[str, Any]:

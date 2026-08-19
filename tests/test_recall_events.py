@@ -91,3 +91,15 @@ def test_hybrid_vad_hook_fires_when_all_quiet():
     assert not calls, "Marco is still talking — no audio_stream_end yet"
     router.handle(recall_event("participant_events.speech_off", marco))
     assert calls == [1]
+
+
+def test_roster_change_callback_fires_for_join_and_leave():
+    changes = []
+    bus = EventBus()
+    speech = SpeechState(bot_name="Gladiator")
+    bridge = AudioBridge(bus, LatencyTracker(bus), chunk_ms=40)
+    router = RecallEventRouter(speech, bus, bridge,
+                               on_roster_change=lambda kind, name: changes.append((kind, name)))
+    router.handle(recall_event("participant_events.join", PRIYA))
+    router.handle(recall_event("participant_events.leave", PRIYA))
+    assert changes == [("join", "Priya"), ("leave", "Priya")]

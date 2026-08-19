@@ -44,6 +44,10 @@ class GeminiSession:
         self._greeting_pending = False
         self.reconnects = 0
 
+    @property
+    def greeted(self) -> bool:
+        return self._greeted
+
     # ---- config -----------------------------------------------------------
     def _build_config(self) -> types.LiveConnectConfig:
         s = self._settings

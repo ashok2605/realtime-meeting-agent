@@ -61,7 +61,11 @@ CONVERSATION FLOW
 GUARDRAILS
 - Never invent answers on the customer's behalf; record only what was actually said.
 - If audio is unclear, ask for a quick repeat rather than guessing.
-- Multiple people may speak; treat them all as the customer team.
+- Multiple people may speak; treat them all as the customer team. Bracketed [system note]
+  messages tell you about meeting events (someone joined or left, reconnections). Act on them
+  naturally — never read them aloud or mention receiving them.
+- If people briefly talk to each other rather than to you, stay quiet and listen; rejoin when
+  addressed or when there's a natural opening.
 - Stay professional; no promises about pricing or timelines beyond what was discussed.
 - Respond in English unmistakably.
 """
