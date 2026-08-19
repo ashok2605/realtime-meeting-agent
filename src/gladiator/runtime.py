@@ -25,7 +25,7 @@ from .core.discovery import DiscoveryTracker
 from .core.events import EventBus
 from .core.latency import LatencyTracker
 from .core.turn_gate import FloorGate, SpeechState
-from .gemini.prompts import SILENCE_NUDGE
+from .gemini.prompts import DROPPED_RESPONSE_NUDGE, SILENCE_NUDGE
 from .gemini.session import GeminiSession
 from .gemini.tools import ToolDispatcher
 from .recall.client import RecallClient
@@ -75,6 +75,7 @@ class Runtime:
         self.bridge.notify_page_flush = self._send_page_flush
         self.bridge.on_state = self.set_face
         self.bridge.vad.on_speech_end = self._on_speech_end
+        self.bridge.on_forced_drop = self._on_forced_drop
 
         # state
         self.bot_id: str | None = None
@@ -86,6 +87,8 @@ class Runtime:
         self.dashboard_ws: set[WebSocket] = set()
         self._admitted = False
         self._last_nudge_mono = time.monotonic()
+        self._greet_task: asyncio.Task | None = None
+        self._last_drop_note_mono = 0.0
         self._tasks: list[asyncio.Task] = []
         self._genai_client: genai.Client | None = None
 
@@ -233,9 +236,46 @@ class Runtime:
         # Never greet the waiting room: require admission AND a live audio path.
         audio_ready = (self.page_capture_ok
                        if self.settings.audio_source == "page" else True)
-        if self._admitted and audio_ready:
-            self.set_face("listening")
-            await self.session.request_greeting()
+        if not (self._admitted and audio_ready) or self.session.greeted:
+            return
+        self.set_face("listening")
+        if self._greet_task is None or self._greet_task.done():
+            self._greet_task = asyncio.create_task(self._greet_when_quiet())
+
+    async def _greet_when_quiet(self, max_wait_s: float = 20.0) -> None:
+        """People usually ARE talking right when they admit the bot; a greeting
+        requested then just gets stale-dropped and the bot seems mute (observed
+        live). Wait for a quiet floor so the greeting actually plays."""
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < max_wait_s and not self.gate.is_open():
+            await asyncio.sleep(0.1)
+        waited = round((time.monotonic() - t0) * 1000, 1)
+        if waited > 200:
+            self.bus.emit("runtime.greeting_waited_for_floor", waited_ms=waited)
+        await self.session.request_greeting()
+
+    def _on_forced_drop(self, reason: str) -> None:
+        asyncio.get_running_loop().create_task(self._notify_dropped_response())
+
+    async def _notify_dropped_response(self, max_wait_s: float = 30.0) -> None:
+        """A stale/hard drop means the humans never heard what the model said —
+        but the model doesn't know that. Once the floor frees up, tell it, so it
+        can restate (unless it already moved on with a newer response)."""
+        epoch_at_drop = self.bridge.buffer.epoch
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < max_wait_s:
+            if self.bridge.buffer.epoch != epoch_at_drop or self.bridge.turn_open:
+                return  # a newer generation superseded the dropped one
+            if self.gate.is_open() and not self.pacer.agent_playing:
+                break
+            await asyncio.sleep(0.1)
+        else:
+            return
+        if time.monotonic() - self._last_drop_note_mono < 15:
+            return
+        self._last_drop_note_mono = time.monotonic()
+        self.bus.emit("runtime.dropped_response_note")
+        await self.session.send_text(DROPPED_RESPONSE_NUDGE)
 
     # ------------------------------------------------------------- controls
     async def control(self, action: str, **kwargs: Any) -> dict[str, Any]:

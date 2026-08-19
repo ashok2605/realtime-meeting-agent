@@ -47,4 +47,7 @@ select = ["E", "F", "I", "W", "UP", "B", "ASYNC"]
 "src/gladiator/gemini/tools.py" = ["E501"]
 # uvicorn startup poll + replay reading one small file once: fine as written.
 "src/gladiator/main.py" = ["ASYNC110", "ASYNC240"]
+# Floor polling is deliberate: the gate mixes VAD state (no event to await)
+# with deadlines; 100ms polls are the simple, correct tool here.
+"src/gladiator/runtime.py" = ["ASYNC110"]
 "tests/*" = ["ASYNC109", "ASYNC110"]  # uvicorn startup poll in the e2e harness

@@ -166,6 +166,13 @@ class AudioBridge:
         self.send_audio_to_gemini: Callable[[bytes], Awaitable[None]] | None = None
         self.notify_page_flush: Callable[[int], Awaitable[None]] | None = None
         self.on_state: Callable[[str], None] = lambda state: None
+        # Called on stale/hard drops: the humans never heard that response, and
+        # the model doesn't know — the runtime tells it once the floor is free.
+        self.on_forced_drop: Callable[[str], None] | None = None
+
+    @property
+    def turn_open(self) -> bool:
+        return self._turn_open
 
     # ---- inbound: meeting -> Gemini --------------------------------------
     def feed_frame(self, pcm: bytes) -> None:
@@ -254,6 +261,8 @@ class AudioBridge:
                        dropped_ms=round(dropped, 1))
         self._schedule_page_flush()
         self.on_state("listening")
+        if self.on_forced_drop is not None:
+            self.on_forced_drop(reason)
 
     def _schedule_page_flush(self) -> None:
         if self.notify_page_flush is not None:

@@ -93,6 +93,14 @@ def reconnect_nudge(progress_note: str) -> str:
     )
 
 
+DROPPED_RESPONSE_NUDGE = (
+    "[system note] The participants could NOT hear your last spoken response — they were "
+    "talking at the same time, so it was skipped rather than played over them. They are quiet "
+    "now. Briefly restate the essential part (this does not count as repeating yourself), "
+    "unless the conversation has clearly moved past it."
+)
+
+
 def context_refresher(progress_note: str) -> str:
     """Sent when sliding-window compression evicted older conversation history."""
     return (
