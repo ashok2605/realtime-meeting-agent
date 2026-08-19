@@ -90,6 +90,12 @@ Gate mechanics:
   the agent can't be muted forever; participant-leave also releases the floor.
 - **hard-stop watchdog** (400 ms): if a human has been talking over playing agent audio (either
   signal) and no `interrupted` arrived (e.g. echo-masked barge-in), we force-drop ourselves.
+- **drop coherence** (live finding): a dropped response exists in the model's history but was
+  never heard — left alone, the model and the humans diverge ("it asked a question; they heard
+  silence"; the greeting was the worst case, since people talk right when admitting a bot). So
+  the greeting waits for a quiet floor before being requested, and any force-drop triggers a
+  rate-limited note — once the floor frees and no newer generation superseded it — telling the
+  model participants never heard it, so it restates naturally.
 
 Epochs make all of this race-free: every chunk carries its generation's epoch; a flush advances
 the epoch; Pacer and page discard stale-epoch chunks unconditionally.
