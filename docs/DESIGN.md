@@ -77,8 +77,9 @@ signals**, consulted by the Pacer before every 40 ms chunk:
    frozen "quiet" must not open the floor over talking humans, and a frozen "voice" must not mute
    the bot forever. `VAD_GATE=false` reverts to events-only gating entirely.
 2. *Recall's `speech_on`/`speech_off`* — speaker attribution (dashboard "who is speaking"; the
-   bot's own name is filtered), the gating signal whenever the VAD is stale or disabled, and a
-   permanent member of the hard-stop union (below). Reliable only with multiple participants.
+   bot's own name is filtered) and the gating/watchdog signal whenever the VAD is stale or
+   disabled. Reliable only with multiple participants — and even then only between utterances,
+   not within them (events stay "on" through a speaker's pauses).
 
 Gate mechanics:
 
@@ -93,11 +94,13 @@ Gate mechanics:
 - **max-hold** (20 s): a stuck `speech_on` (lost event, participant left mid-word) is pruned so
   the agent can't be muted forever; participant-leave also releases the floor.
 - **hard-stop watchdog** (400 ms): if a human has been talking over playing agent audio and no
-  `interrupted` arrived, we force-drop ourselves. Safety-critical, so it takes the UNION of both
-  signals (a live VAD catches speech events never report; fresh events catch speakers below the
-  VAD threshold), with stuck phantoms pruned first. Asymmetric risk pricing: a fresh false event
-  costs one dropped response — which the drop-recovery note restates — while a missed real
-  overlap means talking over a human. Force-drops are sticky (a re-fire can't clear the
+  `interrupted` arrived, we force-drop ourselves. Signal policy converged to: **a live VAD's word
+  is final; events back-stop only when the VAD is stale** (pruned first). We shipped the union of
+  both signals first — priced as "a false drop is recoverable" — and multi-party testing
+  falsified it: speech events stay on through a speaker's between-sentence pauses, so event-only
+  kills (18 of 23 in one 5-minute run, mic provably quiet) shredded agent speech into 50–250ms
+  blips. Residual soft-speaker risk is carried by Gemini's own barge-in VAD, which hears the same
+  mix, plus a configurable RMS threshold. Force-drops are sticky (a re-fire can't clear the
   discard flag and replay a killed generation's tail) and count as handled overlaps.
 - **drop coherence** (live finding): a dropped response exists in the model's history but was
   never heard — left alone, the model and the humans diverge ("it asked a question; they heard

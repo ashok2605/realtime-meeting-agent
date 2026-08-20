@@ -359,17 +359,22 @@ class Runtime:
     def _hard_stop_due(self) -> float | None:
         """Overlap in ms once a human has talked over playing agent audio for
         >= gate_hard_stop_ms with no interruption handled yet, else None.
-        Safety-critical -> UNION of both signals (live VAD + pruned events):
-        a false drop is recoverable, talking over a human is not."""
+        A live VAD's word is final here too: speech events fire during people's
+        between-sentence pauses (multi-party testing: 18 of 23 kills had a
+        quiet mic), shredding agent speech into blips. Events trigger a hard
+        stop only when the VAD is stale or disabled."""
         if not self.pacer.agent_playing:
             return None
         hard_stop_s = self.settings.gate_hard_stop_ms / 1000
-        self.speech.prune_stuck(self.settings.gate_max_hold_ms / 1000)
-        since_candidates = [s.since_mono for s in self.speech.speaking.values()]
         vad = self.bridge.vad
-        if (self._vad_authoritative and vad.in_voice and vad.voice_since is not None
-                and not vad.is_stale(self.gate.VAD_STALE_AFTER_S)):
-            since_candidates.append(vad.voice_since)
+        vad_live = (self._vad_authoritative
+                    and not vad.is_stale(self.gate.VAD_STALE_AFTER_S))
+        if vad_live:
+            since_candidates = ([vad.voice_since]
+                                if vad.in_voice and vad.voice_since is not None else [])
+        else:
+            self.speech.prune_stuck(self.settings.gate_max_hold_ms / 1000)
+            since_candidates = [s.since_mono for s in self.speech.speaking.values()]
         if not since_candidates:
             return None
         earliest = min(since_candidates)

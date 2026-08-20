@@ -81,16 +81,19 @@ async def test_events_still_gate_when_vad_disabled():
     assert gate.is_open()
 
 
-async def test_hard_stop_unions_both_signals(tmp_path):
-    """Watchdog = union of live VAD + pruned events (soft speakers covered)."""
+async def test_hard_stop_vad_is_final_while_live(tmp_path):
+    """A live VAD's word is final for the watchdog: speech events alone must
+    never kill agent audio (live regression: 18/23 kills fired during
+    between-sentence pauses with a provably quiet mic). Events back-stop only
+    when the VAD is stale."""
     settings = Settings(recall_api_key="x", gemini_api_key="x", runs_dir=tmp_path,
                         gate_hard_stop_ms=50, gate_max_hold_ms=1_000)
     rt = Runtime(settings)
     now = time.monotonic()
     rt.pacer._last_send_mono = now                      # agent actively playing
 
-    # VAD alone (live feed) fires
-    rt.bridge.vad.last_feed_mono = now
+    # live VAD hearing voice fires
+    rt.bridge.vad.last_feed_mono = now + 3600           # feed flowing
     rt.bridge.vad.in_voice = True
     rt.bridge.vad.voice_since = now - 0.2
     assert rt._hard_stop_due() is not None
@@ -98,24 +101,23 @@ async def test_hard_stop_unions_both_signals(tmp_path):
     rt.bridge.last_interrupt_mono = now                 # Gemini already handled it
     assert rt._hard_stop_due() is None
 
-    # fresh Recall event alone fires too (soft speaker the VAD can't hear)
+    # live VAD quiet + fresh speech event = between-sentence pause: NO kill
     rt.bridge.last_interrupt_mono = -1e9
     rt.bridge.vad.in_voice = False
     rt.bridge.vad.voice_since = None
-    rt.speech.on_speech_on("1", "Priya")
-    rt.speech.speaking["1"].since_mono = now - 0.2
+    rt.speech.on_speech_on("1", "Rajesh Raja")
+    rt.speech.speaking["1"].since_mono = now - 2.0
+    assert rt._hard_stop_due() is None, "events must not kill while the VAD is live"
+
+    # VAD stale (feed died): events become the backstop again
+    rt.bridge.vad.last_feed_mono = now - 10
+    rt.speech.speaking["1"].since_mono = now - 0.2      # fresh
     assert rt._hard_stop_due() is not None
 
     # ...but an ancient stuck phantom is pruned, not acted on
     rt.speech.speaking["1"].since_mono = now - 5        # > max_hold (1s)
     assert rt._hard_stop_due() is None
     assert not rt.speech.any_human_speaking(), "phantom must be pruned"
-
-    # stale VAD (stalled feed) contributes nothing
-    rt.bridge.vad.last_feed_mono = now - 10
-    rt.bridge.vad.in_voice = True
-    rt.bridge.vad.voice_since = now - 0.2
-    assert rt._hard_stop_due() is None
     rt.bus.close()
 
 

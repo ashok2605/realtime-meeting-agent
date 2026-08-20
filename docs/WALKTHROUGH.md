@@ -302,9 +302,10 @@ authoritative; Recall events if VAD stale/absent) **and** ≥300ms of silence
 (grace). Waiting >2.5s returns DROP (stale answer — delete, don't play late). A
 separate hard-stop watchdog (`Runtime._hard_stop_due`) covers the other direction:
 human talks *over* playing agent audio for 400ms with no `interrupted` → force
-drop. The gate uses whichever single signal is trustworthy; the watchdog uses the
-**union** of both (asymmetric risk: false drop is recoverable, talking over a
-human is not).
+drop. Both gate and watchdog treat a **live VAD's word as final**; speech events
+back-stop only when the audio feed is stale. (A union was tried and falsified
+live: events fire through people's between-sentence pauses — 18 of 23 kills in
+one multi-party run had a provably quiet mic — shredding agent speech into blips.)
 
 **Gotcha**: dropping audio the model already "said" desynchronizes its beliefs
 from reality — it thinks it asked a question nobody heard. Every force-drop
@@ -1172,11 +1173,13 @@ Format: **Decision** — rejected alternative — the one-line defense.
    always truthful *while it flows*, so authority follows liveness — with an
    explicit staleness handover instead of a silent failure.
 
-6. **Hard-stop watchdog uses the UNION of both signals.** Rejected: same
-   authority rule as the gate. *Defense*: the two decisions price risk
-   oppositely — blocking the floor wrongly mutes the bot (recoverable), while
-   missing an overlap talks over a human (not) — so the safety check gets the
-   more paranoid signal set, with pruning to cap the false-positive cost.
+6. **Hard-stop watchdog: live VAD is final; events only when the VAD is
+   stale.** Rejected: the union of both signals (we shipped it first).
+   *Defense*: multi-party testing falsified the union — speech events stay
+   "on" through a speaker's between-sentence pauses, so event-triggered kills
+   shredded agent audio into 50–250ms blips (18 of 23 kills with a quiet
+   mic); the residual soft-speaker risk is carried by Gemini's own barge-in
+   VAD and a configurable RMS threshold.
 
 7. **Stale-drop: a gated answer older than 2.5s is deleted, not played.**
    Rejected: play it when the human stops (simpler). *Defense*: a reply to a
@@ -1300,10 +1303,11 @@ Each: the invariant → what breaks if violated → the guarding test(s).
    the bot forever. Guard:
    `test_vad_gate.py::test_stale_vad_falls_back_to_events_gating`.
 
-7. **The hard-stop unions live-VAD with pruned events.** Violated → soft
-   speakers (or a dead feed) can be talked over indefinitely; or stuck
-   phantoms force-drop healthy speech. Guard:
-   `test_vad_gate.py::test_hard_stop_unions_both_signals`.
+7. **While the VAD is live, speech events can never hard-stop agent audio;
+   when it's stale, they back-stop (pruned).** Violated → between-sentence
+   pauses shred agent speech into blips (observed live); or a dead feed
+   removes the last overlap protection. Guard:
+   `test_vad_gate.py::test_hard_stop_vad_is_final_while_live`.
 
 8. **The bot never gates on its own voice/name.** Violated → self-deadlock
    (it waits for itself to stop talking). Guard:
@@ -1410,7 +1414,7 @@ chunk — needs the room quiet (live EnergyVAD on the actual meeting audio,
 falling back to Recall events when the VAD is stale) plus 300ms grace. While
 speaking: Gemini's `interrupted` flushes everything in O(1) (epoch bump + page
 flush), and if Gemini misses it, `_hard_stop_due` force-drops on 400ms of
-overlap using the *union* of both signals. Guarded by `test_turn_gate`,
+VAD-heard overlap (events back-stop only if the feed dies). Guarded by `test_turn_gate`,
 `test_vad_gate`, `test_stale_policy`.
 
 **Q4. Why isn't the Recall speech-event stream enough for turn-taking?**
@@ -1421,11 +1425,13 @@ a provably silent room (RMS 0). Events are now attribution + fallback; the
 meeting audio itself is the authority while it flows (`turn_gate._live_vad`).
 
 **Q5. Your VAD is a loudness threshold — what about a soft speaker below it?**
-The gate could miss them, which is why the *hard-stop* watchdog unions in
-Recall events (`runtime._hard_stop_due`): if events report a speaker the VAD
-can't hear over playing agent audio, we force-drop anyway. Asymmetric risk
-pricing — a false drop costs one restated answer; talking over a human costs
-the core requirement.
+A knowingly accepted residual risk, and the story shows why: we first unioned
+Recall events into the hard-stop to cover exactly this — and multi-party
+testing falsified it (events stay on through between-sentence pauses; 18 of 23
+kills fired with a provably quiet mic, shredding agent speech into blips). Now
+a live VAD's word is final; events back-stop only if the audio feed dies. What
+still protects a soft speaker: Gemini's own VAD hears the full mix and
+barge-ins independently, and the RMS threshold is a config knob.
 
 **Q6. What happens if the page's audio feed dies mid-call?**
 `EnergyVAD.is_stale` (no frames for 1.5s) strips the VAD's authority, so the

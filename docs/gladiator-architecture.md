@@ -185,7 +185,7 @@ sequenceDiagram
         PC->>B: DROP → force_drop: flush + discard tail (sticky)
         Note over PC: later, floor quiet → nudge Gemini:<br/>"participants could NOT hear your last response —<br/>briefly restate"
     end
-    Note over PC: backstop: 400ms of overlap with no interrupted →<br/>hard-stop force-drop (union of VAD + pruned events)
+    Note over PC: backstop: 400ms of VAD-heard overlap, no interrupted →<br/>hard-stop force-drop (events back-stop only if the audio feed dies)
     end
 ```
 
