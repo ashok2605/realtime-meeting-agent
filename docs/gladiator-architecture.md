@@ -40,7 +40,7 @@ flowchart LR
    microphone *is* the meeting audio."
 2. "The page is deliberately dumb — a mic, a speaker, a status face. All
    intelligence is in one Python process on my laptop, because Gemini Live is
-   server-to-server auth and every graded thing — latency, dashboard, debugging —
+   server-to-server auth and everything worth observing — latency, dashboard, debugging —
    wants to live where I can instrument it."
 3. "The tunnel exists only because Recall's cloud must reach my laptop (the page
    plus its event stream). Nothing is deployed."

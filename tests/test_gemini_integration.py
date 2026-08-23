@@ -2,7 +2,7 @@
 
 These exercise the production stack (GeminiSession + AudioBridge +
 ToolDispatcher + real system prompt) with spoken fixtures, and double as the
-recorded evidence for the assignment's visible test cases:
+recorded evidence for the headline requirements:
   - responds when addressed as "Glad" and as "Gladiator"
   - record_answer tool call fires from a spoken answer (dashboard update path)
   - barge-in mid-response yields `interrupted` and flushes our buffer

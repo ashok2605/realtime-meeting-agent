@@ -6,15 +6,15 @@ post-sales technical discovery — theme: *implementing Salesforce for an automo
 participants answer, Gladiator records every answer to a live dashboard **via Gemini tool calls**,
 with per-turn latency waterfalls and a full structured event log.
 
-## Assignment test cases → where they're handled
+## Requirements → where they're handled
 
-| Test case | Mechanism | Evidence |
+| Requirement | Mechanism | Evidence |
 |---|---|---|
 | Responds to "Gladiator" and "Glad" | persona + naming rules in the system instruction | `tests/test_gemini_integration.py::test_responds_to_both_names` (real API, spoken fixtures) |
 | 5–10 preset discovery questions | 8 questions in `core/discovery.py`, worked through conversationally | dashboard checklist |
 | Dashboard updated via tool calls | `record_answer` / `mark_question_asked` / `mark_question_skipped` / `set_meeting_phase` function declarations | `::test_spoken_answer_triggers_record_answer_tool` |
 | Web search | `google_search` grounding inside the Live session (combined-tools config verified against the real API by `gladiator doctor`) | `::test_web_search_used_when_asked` |
-| Glad never interrupts a speaker | `FloorGate` on two signals — EnergyVAD over the live meeting audio (primary) + Recall's speaker-attributed `speech_on/off` — with grace period, stale-drop, and a hard-stop watchdog | `tests/test_turn_gate.py`, `tests/test_vad_gate.py`, `tests/test_stale_policy.py` |
+| Glad never interrupts a speaker | `FloorGate` on the live meeting audio (EnergyVAD authoritative; Recall's speaker-attributed `speech_on/off` as fallback + attribution), with grace period, stale-drop, and a hard-stop watchdog | `tests/test_turn_gate.py`, `tests/test_vad_gate.py`, `tests/test_stale_policy.py` |
 | Anyone can interrupt Glad | Gemini VAD barge-in → `interrupted` → server buffer epoch-flush + page buffer flush in one hop | `::test_barge_in_interrupts_and_flushes`, `tests/test_receive_loop.py` |
 | Smooth, non-jittery audio | AudioWorklet playback (sample-accurate), server-side pacer with a ~160 ms primed jitter buffer, `web_4_core` bot | `tests/test_latency.py::test_pacer_keeps_bounded_head_start` |
 
@@ -98,13 +98,13 @@ Ctrl+C, or `uv run gladiator leave`.
 ## Tests
 
 ```bash
-uv run pytest                     # 36 unit tests, no network
+uv run pytest                     # 60 unit tests, no network
 scripts/record_fixtures.sh        # one-time: spoken fixtures via macOS `say`
 RUN_INTEGRATION=1 uv run pytest   # + 5 tests against the real Gemini Live API
 ```
 
 The integration tests exercise the production stack with spoken audio and are recorded evidence
-for the visible test cases. `tests/test_e2e_ws.py` goes furthest: a synthetic Output Media page
+for the headline requirements. `tests/test_e2e_ws.py` goes furthest: a synthetic Output Media page
 speaks the page's exact websocket wire protocol against the real server + real Gemini session —
 greeting audio delivery, a spoken answer triggering `record_answer`, and a fully-assembled
 latency waterfall — everything a live meeting exercises except Recall itself.

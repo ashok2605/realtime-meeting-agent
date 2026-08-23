@@ -61,7 +61,7 @@ async def test_vad_is_authoritative_over_phantom_speech_events():
     vad.feed(LOUD)
     t["now"] = 101.0
     vad.feed(QUIET)  # room genuinely quiet for ~1s
-    speech.on_speech_on("1", "Madamanchi Ashok Chowdary")  # phantom, no speech_off
+    speech.on_speech_on("1", "Priya")  # phantom, no speech_off
     assert gate.is_open(), "phantom event must not block a quiet room"
     assert await gate.wait_for_floor() == OPEN
 
@@ -105,7 +105,7 @@ async def test_hard_stop_vad_is_final_while_live(tmp_path):
     rt.bridge.last_interrupt_mono = -1e9
     rt.bridge.vad.in_voice = False
     rt.bridge.vad.voice_since = None
-    rt.speech.on_speech_on("1", "Rajesh Raja")
+    rt.speech.on_speech_on("1", "Marco")
     rt.speech.speaking["1"].since_mono = now - 2.0
     assert rt._hard_stop_due() is None, "events must not kill while the VAD is live"
 
